@@ -1,0 +1,84 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc"],
+  "categories": {
+    "correctness": "error"
+    // "suspicious": "warn",
+    // "pedantic": "warn",
+    // "perf": "error",
+    // "style": "warn"
+  },
+  "rules": {
+    // "no-console": "warn",
+    "eqeqeq": "error",
+    // "curly": "error",
+
+    // "typescript/no-explicit-any": "error",
+    "typescript/no-non-null-assertion": "error",
+    "typescript/no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_"
+      }
+    ],
+
+    "promise/no-return-wrap": "error",
+    "promise/no-nesting": "warn",
+
+    // "security/no-eval": "error",
+
+    "const-comparisons": "error",
+    "no-cond-assign": "error",
+    "no-const-assign": "error",
+    "no-debugger": "error",
+    "no-dupe-class-members": "error",
+    "no-dupe-keys": "error",
+    "no-empty-pattern": "error",
+    "import/no-duplicates": "error",
+
+    "no-control-regex": "off",
+
+    "no-useless-escape": "off",
+    "no-this-alias": "off", // many intentional this aliases
+    "triple-slash-reference": "off", // many intentional triple slash references
+
+    // This rule is dumb.
+    // Array.from is MUCH slower than new Array(size).
+    "no-new-array": "off",
+
+    // We have custom thenables. This is not a bug.
+    "no-thenable": "off",
+
+    // We use this in some cases. The ordering is deliberate.
+    "no-unsafe-finally": "off",
+
+    // We use !!$debug to check if the debugger is enabled.
+    // Boolean() is also generally slower than !!.
+    "no-extra-boolean-cast": "off",
+
+    // Eslint is not a type checker.
+    "no-throw-literal": "off"
+  },
+  // "ignorePatterns": ["bun.lock"],
+  "env": {
+    "builtin": true
+  },
+  "ignorePatterns": [
+    "dist",
+    "build",
+    ".elysia",
+    ".bun",
+    "coverage",
+    "node_modules",
+    "src/db/seeds/**"
+  ],
+  "overrides": [
+    {
+      "files": ["src/**/*.ts"],
+      "rules": {
+        "no-unused-vars": "off"
+      }
+    }
+  ]
+}
