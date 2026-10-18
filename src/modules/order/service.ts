@@ -7,7 +7,7 @@ import {
   users,
 } from "@/db/schema";
 import { order_items, OrderInsert, orders } from "@/db/schema/order";
-import { and, asc, count, desc, eq, ilike, inArray } from "drizzle-orm";
+import { and, asc, count, desc, eq, ilike, inArray, sql } from "drizzle-orm";
 import { PaymentService } from "../payments/service";
 import { PaymentMethodType } from "@/db/schema/payment";
 
@@ -41,7 +41,6 @@ export abstract class OrderService {
         customer_name: users.name,
         email: users.email,
         customer_company: customers.company_name,
-        delivery_type: orders.delivery_type,
         status: orders.status,
         version: orders.version,
       })
@@ -97,9 +96,9 @@ export abstract class OrderService {
     const [order_row] = await db
       .select({
         id: orders.id,
+        order_number: orders.order_number,
         customer_id: orders.customer_id,
         customer_name: users.name,
-        delivery_type: orders.delivery_type,
         // description: orders.description,
         status: orders.status,
         notes: orders.notes,
@@ -148,28 +147,31 @@ export abstract class OrderService {
     return order === "asc" ? asc(column) : desc(column);
   }
 
-  static async getOrderDetailByIds(inventoryIds: number[]) {
+  static async getOrderDetailsByIds(orderIds: number[]) {
     const rows = await db
       .select({
-        inventory_id: inventory.id,
-        product_id: inventory.product_id,
-        product_name: products.name,
-        product_variant_name: product_variants.name,
-        product_variant_sku: product_variants.sku,
-        description: product_variants.description,
-        // quantity: order_items.quantity,
-        price: product_variants.price,
+        id: orders.id,
+        order_number: orders.order_number,
+        customer_company: customers.company_name,
+        destination: customers.address,
+        item_count: count(order_items.id),
+        total: sql<number>`coalesce(sum(${order_items.quantity} * ${product_variants.price}), 0)`,
       })
-      .from(inventory)
-      .leftJoin(products, eq(inventory.product_id, products.id))
+      .from(orders)
+      .leftJoin(customers, eq(orders.customer_id, customers.id))
+      .leftJoin(order_items, eq(orders.id, order_items.order_id))
+      .leftJoin(inventory, eq(order_items.inventory_id, inventory.id))
       .leftJoin(
         product_variants,
         eq(inventory.product_variant_id, product_variants.id),
       )
-      .leftJoin(order_items, eq(inventory.id, order_items.inventory_id))
-      .where(inArray(inventory.id, inventoryIds));
+      .where(inArray(orders.id, orderIds))
+      .groupBy(orders.id, customers.company_name, customers.address);
 
-    return rows;
+    return rows.map((row) => ({
+      ...row,
+      total: Number(row.total),
+    }));
   }
 
   static async createOrder(
@@ -207,16 +209,15 @@ export abstract class OrderService {
         .from(orders)
         .where(eq(orders.customer_id, data.customer_id));
 
-      if (order_count && order_count.count >= 1) {
-        throw new Error("Customer has reached the maximum number of orders");
-      }
+      // if (order_count && order_count.count >= 1) {
+      //   throw new Error("Customer has reached the maximum number of orders");
+      // }
 
       const [new_order] = await tx
         .insert(orders)
         .values({
           order_number: "",
           customer_id: data.customer_id,
-          delivery_type: data.delivery_type,
           payment_arrangement: data.payment_arrangement,
           notes: data.notes || "",
         })
@@ -274,6 +275,10 @@ export abstract class OrderService {
           });
         }
       }
+
+      return {
+        message: `Order ${order_number} has been created successfully.`,
+      };
     });
   }
 
@@ -378,13 +383,62 @@ export abstract class OrderService {
         order_number: orders.order_number,
         customer_name: users.name,
         customer_company: customers.company_name,
-        delivery_type: orders.delivery_type,
+        payment_arrangement: orders.payment_arrangement,
         status: orders.status,
+        customer_address: customers.address,
+        customer_phone: customers.phone_number,
+        shipping_recipient: orders.shipping_recipient,
+        shipping_phone: orders.shipping_phone,
+        shipping_address: orders.shipping_address,
       })
       .from(orders)
       .leftJoin(customers, eq(orders.customer_id, customers.id))
       .leftJoin(users, eq(customers.user_id, users.id))
       .where(and(whereQuery, eq(orders.status, "READY_FOR_DELIVERY")))
+      .offset(offset)
+      .limit(limit);
+
+    return {
+      rows,
+      total: total_result?.count ?? 0,
+    };
+  }
+
+  static async getAllOrderForCombobox(
+    page: number = 1,
+    limit: number = 10,
+    search: string = "",
+  ) {
+    const is_search_empty = search.length === 0;
+    const offset = is_search_empty ? Math.max(page * limit, 0) : 0;
+
+    const whereQuery = ilike(users.name, `%${search}%`);
+
+    const [total_result] = await db
+      .select({ count: count() })
+      .from(orders)
+      .leftJoin(customers, eq(orders.customer_id, customers.id))
+      .leftJoin(users, eq(customers.user_id, users.id))
+      .where(and(whereQuery));
+
+    const rows = await db
+      .select({
+        id: orders.id,
+        order_number: orders.order_number,
+        customer_name: users.name,
+        customer_company: customers.company_name,
+        payment_arrangement: orders.payment_arrangement,
+        status: orders.status,
+        customer_address: customers.address,
+        customer_phone: customers.phone_number,
+        shipping_recipient: orders.shipping_recipient,
+        shipping_phone: orders.shipping_phone,
+        shipping_address: orders.shipping_address,
+      })
+      .from(orders)
+      .leftJoin(customers, eq(orders.customer_id, customers.id))
+      .leftJoin(users, eq(customers.user_id, users.id))
+      .where(and(whereQuery))
       .offset(offset)
       .limit(limit);
 

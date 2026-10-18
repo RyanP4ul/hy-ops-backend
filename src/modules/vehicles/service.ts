@@ -120,6 +120,34 @@ export abstract class VehicleService {
       .where(and(eq(vehicles.id, id), eq(vehicles.version, version)));
     return { message: `Vehicle with ID ${id} deleted successfully` };
   }
+
+  static async getVehicleForCombobox(
+    page: number,
+    limit: number,
+    search: string,
+  ) {
+    const offset = search.length === 0 ? Math.max(page * limit, 0) : 0;
+    const whereQuery = search.length
+      ? ilike(vehicles.plate_number, `%${search}%`)
+      : undefined;
+
+    const [[totalResult], rows] = await Promise.all([
+      db.select({ count: count() }).from(vehicles).where(whereQuery),
+      db
+        .select({
+          id: vehicles.id,
+          plate_number: vehicles.plate_number,
+          type: vehicles.type,
+        })
+        .from(vehicles)
+        .where(and(eq(vehicles.status, "available"), whereQuery))
+        .orderBy(asc(vehicles.plate_number))
+        .limit(limit)
+        .offset(offset),
+    ]);
+
+    return { rows, total: totalResult?.count ?? 0 };
+  }
 }
 
 export const vehicleService = VehicleService;

@@ -8,7 +8,18 @@ import {
   settings,
   warehouses,
 } from "@/db/schema";
-import { and, count, desc, eq, gt, gte, ilike, lte, or } from "drizzle-orm";
+import {
+  and,
+  count,
+  desc,
+  eq,
+  gt,
+  gte,
+  ilike,
+  inArray,
+  lte,
+  or,
+} from "drizzle-orm";
 import { inventory_stock_status } from "./model";
 
 export abstract class InventoryService {
@@ -265,6 +276,28 @@ export abstract class InventoryService {
       rows: result,
       total: total_count.count,
     };
+  }
+
+  static async getInventoryDetailById(ids: number[]) {
+    const result = await db
+      .select({
+        inventory_id: inventory.id,
+        product_id: products.id,
+        product_variant_name: product_variants.name,
+        product_variant_sku: product_variants.sku,
+        quantity: inventory.quantity,
+        price: product_variants.price,
+        description: product_variants.description,
+      })
+      .from(inventory)
+      .leftJoin(products, eq(inventory.product_id, products.id))
+      .leftJoin(
+        product_variants,
+        eq(inventory.product_variant_id, product_variants.id),
+      )
+      .where(inArray(inventory.id, ids));
+
+    return result;
   }
 
   // static async getInventoryByOffset(page: number | null = 1, limit: number = 10) {

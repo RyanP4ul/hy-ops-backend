@@ -4,7 +4,7 @@ import { UserRole } from "../../db/schema/users";
 export const LoginModel = {
   login: t.Object({
     email: t.String({ format: "email" }),
-    password: t.String({ minLength: 1 }),
+    password: t.String({ minLength: 6 }),
   }),
 };
 

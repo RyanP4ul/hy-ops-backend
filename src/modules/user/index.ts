@@ -89,7 +89,16 @@ export const userRoutes = new Elysia({ prefix: "/users" })
       );
     },
     { params: t.Object({ id: t.Numeric({ minimum: 1 }) }) },
-  );
+  )
+  .get("/drivers", async ({ query }) => {
+    const page = Math.max(Number.parseInt(query.page ?? "0", 10) || 0, 0);
+    const limit = Math.min(
+      Math.max(Number.parseInt(query.limit ?? "10", 10) || 10, 1),
+      50,
+    );
+    const search = query.search?.trim() ?? "";
+    return await UserService.getAllDrivers(page, limit, search);
+  });
 // .post("/", async ({ body }) => UserService.createUser(body), {
 //   body: t.Object({
 //     name: t.String({ minLength: 1, maxLength: 100 }),

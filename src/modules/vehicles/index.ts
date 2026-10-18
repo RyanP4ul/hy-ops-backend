@@ -13,8 +13,15 @@ export const vehicleRoutes = new Elysia({ prefix: "/vehicles" })
       query.search?.trim() ?? "",
       query.sort_by ? String(query.sort_by) : "id:desc",
     );
-    set.headers["X-Total-Count"] = String(result.total);
-    return result.rows;
+
+    const is_cb = query.is_cb === "true" ? true : false;
+
+    if (is_cb) {
+      return result;
+    } else {
+      set.headers["X-Total-Count"] = String(result.total);
+      return result.rows;
+    }
   })
   .get("/:id", async ({ params, set }) => {
     const vehicle = await vehicleService.getVehicleById(Number(params.id));
@@ -62,4 +69,13 @@ export const vehicleRoutes = new Elysia({ prefix: "/vehicles" })
         Number(query.version || 0),
       ),
     { params: t.Object({ id: t.Numeric({ minimum: 1 }) }) },
-  );
+  )
+  .get("/cb", async ({ query }) => {
+    const result = await vehicleService.getVehicleForCombobox(
+      query.page ? Number(query.page) : 0,
+      query.limit ? Number(query.limit) : 10,
+      query.search?.trim() ?? "",
+    );
+
+    return result;
+  });

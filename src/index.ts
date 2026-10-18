@@ -22,6 +22,9 @@ import { vehicleRoutes } from "./modules/vehicles";
 import { lalamoveRoutes } from "./modules/lalamove";
 import { orderRoutes } from "./modules/order";
 import { deliveryScheduleRoutes } from "./modules/delivery-schedule";
+import { deliveriesRoutes } from "./modules/deliveries";
+import { calendarRoutes } from "./modules/calendar";
+import { paymentRoutes } from "./modules/payments";
 
 const app = new Elysia()
   .onStart(async () => {
@@ -137,7 +140,10 @@ const app = new Elysia()
         .use(warehouseRoutes)
         .use(vehicleRoutes)
         .use(orderRoutes)
-        .use(deliveryScheduleRoutes),
+        .use(deliveryScheduleRoutes)
+        .use(deliveriesRoutes)
+        .use(calendarRoutes)
+        .use(paymentRoutes),
   )
   .listen(5173);
 

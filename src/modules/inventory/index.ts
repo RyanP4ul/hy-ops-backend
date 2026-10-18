@@ -71,4 +71,8 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
   })
   .get("/names", async () => {
     return await InventoryService.getInventoryNames();
+  })
+  .get("/details", async ({ query }) => {
+    const order_ids = query.ids ? query.ids.split(",").map(Number) : [];
+    return await InventoryService.getInventoryDetailById(order_ids);
   });
