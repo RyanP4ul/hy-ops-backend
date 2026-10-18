@@ -16,15 +16,10 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 
-export const delivery_type = pgEnum("delivery_type", [
-  "LALAMOVE",
-  "PICKUP",
-  "INTERNAL",
-]);
-
 export const order_status = pgEnum("order_status", [
   "PENDING",
   "PROCESSING",
+  "SCHEDULING",
   "READY_FOR_DELIVERY",
   "SCHEDULED",
   "IN_TRANSIT",
@@ -52,7 +47,6 @@ export const orders = pgTable("orders", {
       onDelete: "cascade",
       onUpdate: "cascade",
     }),
-  delivery_type: delivery_type("delivery_type").notNull().default("INTERNAL"),
   payment_arrangement: payment_arrangement("payment_arrangement").default(
     "NET_30",
   ),

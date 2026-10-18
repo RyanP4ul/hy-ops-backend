@@ -105,25 +105,23 @@ export const authRoutes = new Elysia({ prefix: "auth" })
     "/login",
     async ({ jwt, body, set, cookie: { access_token, refresh_token } }) => {
       const { email, password } = body;
-
-      if (!email || !password) {
-        set.status = 400;
-        return {
-          message: "Email and password are required",
-        };
-      }
-
+      const errors: Record<string, string> = {};
       const user = await UserService.findUserByEmail(email);
 
       if (!user || !(await bcrypt.compare(password, user.password_hash))) {
         set.status = 400;
+        errors["email"] = "Invalid credentials.";
+      }
+
+      if (errors && Object.keys(errors).length > 0) {
+        set.status = 400;
         return {
-          message: "Invalid credentials.",
+          errors,
         };
       }
 
       const { accessToken, refreshToken } = await UserService.rotateSession(
-        user.id,
+        user?.id || -1,
         jwt,
       );
 
@@ -137,7 +135,9 @@ export const authRoutes = new Elysia({ prefix: "auth" })
         ...cookieOptions(configCookie.REFRESH_TOKEN_EXPIRATION),
       });
 
-      return "ok";
+      return {
+        message: "Logged in",
+      };
     },
     {
       body: "login",
@@ -149,5 +149,7 @@ export const authRoutes = new Elysia({ prefix: "auth" })
 
     set.status = 200;
 
-    return "ok";
+    return {
+      message: "Logged out",
+    };
   });

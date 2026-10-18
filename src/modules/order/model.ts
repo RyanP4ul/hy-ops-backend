@@ -2,11 +2,6 @@ import Elysia, { Static, t } from "elysia";
 
 export const orderSchema = t.Object({
   customer_id: t.Numeric({ minimum: 1 }),
-  delivery_type: t.Union([
-    t.Literal("LALAMOVE"),
-    t.Literal("PICKUP"),
-    t.Literal("INTERNAL"),
-  ]),
   notes: t.Optional(t.String()),
   payment_method: t.Union([
     t.Literal("BANK_TRANSFER"),
@@ -32,13 +27,6 @@ export type OrderItemType = Static<typeof orderItemSchema>;
 
 export const orderUpdateSchema = t.Object({
   customer_id: t.Optional(t.Numeric({ minimum: 1 })),
-  delivery_type: t.Optional(
-    t.Union([
-      t.Literal("LALAMOVE"),
-      t.Literal("PICKUP"),
-      t.Literal("INTERNAL"),
-    ]),
-  ),
   notes: t.Optional(t.String()),
 });
 

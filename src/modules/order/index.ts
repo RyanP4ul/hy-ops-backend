@@ -44,7 +44,7 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   )
   .get("/details", async ({ query }) => {
     const order_ids = query.ids ? query.ids.split(",").map(Number) : [];
-    return await OrderService.getOrderDetailByIds(order_ids);
+    return await OrderService.getOrderDetailsByIds(order_ids);
   })
   .post(
     "/",
@@ -93,4 +93,18 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
         id: t.Number(),
       }),
     },
-  );
+  )
+  // getAllOrderForCombobox
+  .get("/cb", async ({ query }) => {
+    const page = query.page ? parseInt(query.page) : 0;
+    let limit = query.limit ? parseInt(query.limit) : 10;
+    const search = query.search ? query.search.trim() : "";
+
+    const result = await OrderService.getAllOrderForCombobox(
+      page,
+      limit,
+      search,
+    );
+
+    return result;
+  });

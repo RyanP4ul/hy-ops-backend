@@ -6,6 +6,7 @@ import { productSeeds } from "./products";
 import { settingSeeds } from "./settings";
 import { userSeeds } from "./users";
 import { vehicleSeeds } from "./vehicles";
+import { calendarSeeds } from "./calendar";
 
 async function run() {
   for (const table of Object.keys(tables) as (keyof typeof tables)[]) {
@@ -21,6 +22,7 @@ async function run() {
   await userSeeds();
   await settingSeeds();
   await vehicleSeeds();
+  await calendarSeeds();
   // await orderSeeds();
 }
 

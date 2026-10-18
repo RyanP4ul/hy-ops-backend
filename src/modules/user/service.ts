@@ -392,4 +392,52 @@ export abstract class UserService {
       return { accessToken, refreshToken };
     });
   }
+
+  static async getAllDrivers(
+    page: number = 1,
+    limit: number = 10,
+    search: string = "",
+  ) {
+    const is_search_empty = search.length === 0;
+    const offset = is_search_empty ? Math.max(page * limit, 0) : 0;
+    const whereQuery = ilike(users.name, `%${search}%`);
+
+    const [total_result] = await db
+      .select({ count: count() })
+      .from(users)
+      .leftJoin(drivers, eq(drivers.user_id, users.id))
+      .where(
+        and(
+          eq(users.role, "driver"),
+          eq(users.is_archived, false),
+          eq(drivers.status, "available"),
+          is_search_empty ? undefined : whereQuery,
+        ),
+      );
+
+    const drivers_query = await db
+      .select({
+        id: drivers.id,
+        name: users.name,
+        status: drivers.status,
+        phone_number: drivers.phone_number,
+      })
+      .from(users)
+      .leftJoin(drivers, eq(drivers.user_id, users.id))
+      .where(
+        and(
+          eq(users.role, "driver"),
+          eq(drivers.status, "available"),
+          eq(users.is_archived, false),
+        ),
+      )
+      .orderBy(desc(users.id))
+      .offset(offset)
+      .limit(limit);
+
+    return {
+      rows: drivers_query,
+      total: total_result?.count ?? 0,
+    };
+  }
 }

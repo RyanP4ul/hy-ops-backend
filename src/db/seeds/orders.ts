@@ -13,7 +13,6 @@ const orderData: OrderInsert[] = [
   {
     customer_id: 1,
     order_number: "ORD-000001",
-    delivery_type: "PICKUP",
     payment_arrangement: "NET_30",
     notes: "Pickup at warehouse A counter",
     status: "PENDING",
@@ -21,7 +20,6 @@ const orderData: OrderInsert[] = [
   {
     customer_id: 1,
     order_number: "ORD-000002",
-    delivery_type: "LALAMOVE",
     payment_arrangement: "NET_30",
     notes: "Deliver to Guiguinto branch",
     status: "PENDING",
@@ -29,7 +27,6 @@ const orderData: OrderInsert[] = [
   {
     customer_id: 1,
     order_number: "ORD-000003",
-    delivery_type: "INTERNAL",
     payment_arrangement: "NET_30",
     notes: "Internal stock transfer",
     status: "PENDING",

@@ -1,20 +1,29 @@
 import Elysia from "elysia";
 import { OrderService } from "../order/service";
+import { DeliveryScheduleService } from "./services";
 
 export const deliveryScheduleRoutes = new Elysia({
   prefix: "/delivery-schedules",
-}).get("/", async ({ query, set }) => {
-  const page = query.page ? parseInt(query.page) : 0;
-  let limit = query.limit ? parseInt(query.limit) : 10;
-  const search = query.search ? query.search.trim() : "";
+})
+  .get("/", async ({ query, set }) => {
+    const page = query.page ? parseInt(query.page) : 0;
+    let limit = query.limit ? parseInt(query.limit) : 10;
+    const search = query.search ? query.search.trim() : "";
 
-  const result = await OrderService.getAllReadyForDeliveryOrders(
-    page,
-    limit,
-    search,
-  );
+    const result = await OrderService.getAllReadyForDeliveryOrders(
+      page,
+      limit,
+      search,
+    );
 
-  set.headers["X-Total-Count"] = result.total;
+    set.headers["X-Total-Count"] = result.total;
 
-  return result.rows;
-});
+    return result.rows;
+  })
+  .get("/available-dates", async () => {
+    const maxOrdersPerDay = 5;
+
+    return DeliveryScheduleService.getAvailableOrderDates({
+      maxOrdersPerDay,
+    });
+  });
