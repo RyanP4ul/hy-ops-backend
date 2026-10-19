@@ -5,6 +5,7 @@ import {
   CalendarEventType,
 } from "@/db/schema/calendar";
 import { CalendarEventCreateType } from "./model";
+import { eq } from "drizzle-orm";
 
 export abstract class CalendarService {
   static async getEvents() {
@@ -20,6 +21,19 @@ export abstract class CalendarService {
       .from(calendar_events);
 
     return result;
+  }
+
+  static async getDeliveryEvents() {
+    return await db
+      .select({
+        id: calendar_events.id,
+        title: calendar_events.title,
+        date: calendar_events.date,
+        start_time: calendar_events.start_time,
+        end_time: calendar_events.end_time,
+      })
+      .from(calendar_events)
+      .where(eq(calendar_events.category, "DELIVERY"));
   }
 
   static async createEvent(data: CalendarEventCreateType) {

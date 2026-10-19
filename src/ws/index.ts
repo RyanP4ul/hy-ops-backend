@@ -14,13 +14,15 @@ export const ws = new Elysia()
   .decorate("current_page", String)
   .ws("/ws", {
     body: t.Object({
-      type: t.String({ minLength: 3, maxLength: 20 }),
+      type: t.String({ minLength: 3, maxLength: 50 }),
       payload: t.Optional(t.Any()),
     }),
 
     async open(ws) {
       const user_agent = parseUserAgent(ws.data.headers["user-agent"] || null);
       const ip_address = String(ws.data.ip_address) || "unknown";
+	  
+	  console.log("ws.data.headers: " + JSON.stringify(ws.data.headers));
 
       const user: AuthUser = {
         sub: ws.data.user.sub,

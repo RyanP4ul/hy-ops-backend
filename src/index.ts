@@ -25,6 +25,7 @@ import { deliveryScheduleRoutes } from "./modules/delivery-schedule";
 import { deliveriesRoutes } from "./modules/deliveries";
 import { calendarRoutes } from "./modules/calendar";
 import { paymentRoutes } from "./modules/payments";
+import { dashboardRoutes } from "./modules/dashboard";
 
 const app = new Elysia()
   .onStart(async () => {
@@ -77,7 +78,7 @@ const app = new Elysia()
   })
   .use(
     cors({
-      origin: ["http://localhost:3000"],
+      origin: ["*"], // ["http://localhost:3000", "http://0.0.0.0"]
       methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
       allowedHeaders: ["Content-Type", "Authorization"],
       credentials: true,
@@ -96,6 +97,7 @@ const app = new Elysia()
     {
       beforeHandle: async ({ cookie: { access_token }, jwt, set }) => {
         if (!access_token.value) {
+		  console.log("beforeHandle > 1");
           set.status = 401;
           return "Unauthorized";
         }
@@ -103,6 +105,8 @@ const app = new Elysia()
         const payload = await jwt.verify(access_token.value as string);
 
         if (!payload) {
+		  console.log("beforeHandle > 2");
+		  console.log("access_token: " + access_token.value);
           set.status = 401;
           return "Unauthorized";
         }
@@ -126,6 +130,7 @@ const app = new Elysia()
           };
         })
         .use(ws)
+        .use(dashboardRoutes)
         .use(productRoutes)
         .use(productVariantRoutes)
         .use(inventoryRoutes)

@@ -56,6 +56,7 @@ export const payments = pgTable(
     reference_number: varchar("reference_number", {
       length: 100,
     }),
+    version: integer("version").notNull().default(1),
     received_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
     created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
     updated_at: timestamp({ withTimezone: true }).notNull().defaultNow(),

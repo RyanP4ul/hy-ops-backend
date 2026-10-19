@@ -1,6 +1,8 @@
 import { UserAgentInfo } from "@/types/auth-user";
 
-export function parseUserAgent(userAgent: string | null): UserAgentInfo {
+export function parseUserAgent(
+  userAgent: string | null,
+): UserAgentInfo {
   const ua = userAgent ?? "";
 
   let browserName = "Unknown";
@@ -10,6 +12,9 @@ export function parseUserAgent(userAgent: string | null): UserAgentInfo {
   let osVersion = "";
 
   let deviceType: UserAgentInfo["device"]["type"] = "unknown";
+
+  // Detect Flutter / Dart HTTP client
+  const isFlutterApp = /Dart\/[\d.]+|Flutter/i.test(ua);
 
   // OS
   if (/Windows NT 10\.0/i.test(ua)) {
@@ -38,35 +43,33 @@ export function parseUserAgent(userAgent: string | null): UserAgentInfo {
   }
 
   // Browser
-  if (/Edg\/([\d.]+)/i.test(ua)) {
+  if (isFlutterApp) {
+    browserName = "HYOps Mobile App";
+    browserVersion = "";
+    deviceType = "mobile";
+  } else if (/Edg\/([\d.]+)/i.test(ua)) {
     browserName = "Microsoft Edge";
-
-    const match = ua.match(/Edg\/([\d.]+)/i);
-    browserVersion = match?.[1] ?? "";
+    browserVersion = ua.match(/Edg\/([\d.]+)/i)?.[1] ?? "";
   } else if (/Chrome\/([\d.]+)/i.test(ua)) {
     browserName = "Google Chrome";
-
-    const match = ua.match(/Chrome\/([\d.]+)/i);
-    browserVersion = match?.[1] ?? "";
+    browserVersion = ua.match(/Chrome\/([\d.]+)/i)?.[1] ?? "";
   } else if (/Firefox\/([\d.]+)/i.test(ua)) {
     browserName = "Mozilla Firefox";
-
-    const match = ua.match(/Firefox\/([\d.]+)/i);
-    browserVersion = match?.[1] ?? "";
+    browserVersion = ua.match(/Firefox\/([\d.]+)/i)?.[1] ?? "";
   } else if (/Version\/([\d.]+).*Safari/i.test(ua)) {
     browserName = "Safari";
-
-    const match = ua.match(/Version\/([\d.]+)/i);
-    browserVersion = match?.[1] ?? "";
+    browserVersion = ua.match(/Version\/([\d.]+)/i)?.[1] ?? "";
   }
 
-  // Device
-  if (/iPhone|Android.*Mobile/i.test(ua)) {
-    deviceType = "mobile";
-  } else if (/iPad|Android(?!.*Mobile)/i.test(ua)) {
-    deviceType = "tablet";
-  } else if (ua) {
-    deviceType = "desktop";
+  // Device, unless already identified as Flutter
+  if (!isFlutterApp) {
+    if (/iPhone|Android.*Mobile/i.test(ua)) {
+      deviceType = "mobile";
+    } else if (/iPad|Android(?!.*Mobile)/i.test(ua)) {
+      deviceType = "tablet";
+    } else if (ua) {
+      deviceType = "desktop";
+    }
   }
 
   return {

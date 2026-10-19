@@ -447,6 +447,19 @@ export abstract class OrderService {
       total: total_result?.count ?? 0,
     };
   }
+
+  static async getTotalOrders() {
+    const [total] = await db.select({ count: count() }).from(orders);
+    return total?.count ?? 0;
+  }
+
+  static async getTotalPendingOrders() {
+    const [total] = await db
+      .select({ count: count() })
+      .from(orders)
+      .where(eq(orders.status, "PENDING"));
+    return total?.count ?? 0;
+  }
 }
 
 export const orderService = OrderService;
