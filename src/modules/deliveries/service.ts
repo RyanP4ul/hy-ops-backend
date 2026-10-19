@@ -191,4 +191,12 @@ export abstract class DeliveryService {
       }
     });
   }
+
+  static async getTotalActiveDeliveries() {
+    const [total] = await db
+      .select({ count: count() })
+      .from(deliveries)
+      .where(eq(deliveries.status, "scheduled"));
+    return total?.count ?? 0;
+  }
 }

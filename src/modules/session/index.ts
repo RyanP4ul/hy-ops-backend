@@ -7,7 +7,7 @@ import { Role } from "../../constant/role";
 
 export const sessionRoutes = new Elysia({ prefix: "/sessions" })
   .decorate("user", AuthUser)
-  .onBeforeHandle(({ user, set }) => requireRole([Role.ADMIN], { user, set }))
+  //.onBeforeHandle(({ user, set }) => requireRole([Role.ADMIN], { user, set }))
   .get("/me", async ({ user }) => {
     return user;
   })

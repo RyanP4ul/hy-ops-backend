@@ -5,6 +5,9 @@ import "./sessions/session-out.request";
 // ARCHIVE REQUESTS
 import "./archives/archive-restored-request";
 
+// DRIVER REQUESTS
+import "./drivers/driver-location.request";
+
 // PRODUCT REQUESTS
 import "./product/add-product-request";
 import "./product/delete-product-request";

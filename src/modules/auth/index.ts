@@ -137,6 +137,8 @@ export const authRoutes = new Elysia({ prefix: "auth" })
 
       return {
         message: "Logged in",
+		access_token: accessToken,
+		refresh_token: refreshToken
       };
     },
     {

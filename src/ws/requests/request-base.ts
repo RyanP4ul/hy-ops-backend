@@ -64,8 +64,14 @@ export abstract class RequestBase<TSchema extends z.ZodTypeAny = z.ZodAny> {
     this.session.ws.send(data);
   }
 
-  protected publish(data: any, topic: string = this.session.page) {
-    this.session.ws.publish(topic, data);
+  protected publish(data: any, topic: string | string[] = this.session.page) {
+    if (Array.isArray(topic)) {
+      for (const t of topic) {
+        this.session.ws.publish(t, data);
+      }
+    } else {
+      this.session.ws.publish(topic, data);
+    }
   }
 
   protected publishBySubscribed(

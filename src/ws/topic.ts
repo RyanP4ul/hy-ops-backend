@@ -8,7 +8,7 @@ export const TOPIC = {
   PAYMENTS: "payments",
   DELIVERIES: "deliveries",
   SCHEDULE: "schedule",
-  MAP: "map",
+  FLEET_MAP: "fleet-map",
   DRIVERS: "drivers",
   VEHICLES: "vehicles",
   USERS: "users",
