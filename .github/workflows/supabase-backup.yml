@@ -3,7 +3,7 @@ name: Supabase Database Backup
 
 on:
   schedule:
-    - cron: "0 18 * * *" # 2 AM Philippines time
+    - cron: "*/5 * * * *"
 
   workflow_dispatch:
 
