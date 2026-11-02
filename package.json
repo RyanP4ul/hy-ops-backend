@@ -3,7 +3,9 @@
   "version": "1.0.50",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
-    "build": "bun build --compile --minify-whitespace --minify-syntax --target bun --outfile server src/index.ts",
+    "build:exe": "bun build --compile --minify-whitespace --minify-syntax --target bun --outfile server src/index.ts",
+	"build:dist": "bun build --minify --target=bun --outdir=dist src/index.ts",
+	"start": "bun run dist/index.js",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
