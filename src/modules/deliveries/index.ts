@@ -135,7 +135,7 @@ export const deliveriesRoutes = new Elysia({
     },
   )
   .post(
-    "/stops/:stopId/delivered",
+    "/stops/:stopId/delivered", // 
     async ({ params, user }) => DeliveryService.markStopDelivered(params.stopId, await staffWarehouse(user)),
     {
       params: StopIdParams,

@@ -3,7 +3,7 @@ import { buildEmailMessage } from "./message";
 import { gmail, oauth2Client } from "../../lib/gmail";
 
 export type EmailSender = (raw: string) => Promise<string | undefined>;
-const gmailSender: EmailSender = async raw => (await gmail.users.messages.send({ userId: "me", requestBody: { raw } }, { timeout: 15000, retry: false })).data.id ?? undefined;
+export const gmailSender: EmailSender = async raw => (await gmail.users.messages.send({ userId: "me", requestBody: { raw } }, { timeout: 15000, retry: false })).data.id ?? undefined;
 export function createEmailRoutes(sender: EmailSender = gmailSender) { return new Elysia({
   prefix: "/email",
 })

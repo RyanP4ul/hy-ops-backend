@@ -1,0 +1,76 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1793339933135,
+      "tag": "0000_nullable_payment_received_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1793341700000,
+      "tag": "0001_order_item_price_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793347700000,
+      "tag": "0002_order_stock_reservations",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793404800000,
+      "tag": "0003_destinations_stock_history_refunds",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793420000000,
+      "tag": "0004_gps_and_receipt_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793423790475,
+      "tag": "0005_harsh_martin_li",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793496345575,
+      "tag": "0006_driver_stop_outcomes",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793503543781,
+      "tag": "0007_driver_history_proofs",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793526275034,
+      "tag": "0008_customer_return_pickups",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793612675034,
+      "tag": "0009_delivery_notifications",
+      "breakpoints": true
+    }
+  ]
+}

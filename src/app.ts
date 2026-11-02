@@ -1,4 +1,5 @@
 import type { SmsGateway } from "./modules/sms/service";
+import { startDeliveryNotificationWorker } from "./modules/deliveries/notification-worker";
 import { startDriverEvents } from "./modules/driver/assignment-events";
 import { authorizeSession, allowedOrigin } from "./modules/auth/policy";
 import type { ProofService } from "./modules/driver/proofs";
@@ -52,6 +53,7 @@ export function createApp(
 ) {
   let events: Awaited<ReturnType<typeof startResourceEvents>> | undefined;
   let driverEvents: Awaited<ReturnType<typeof startDriverEvents>> | undefined;
+  let deliveryNotifications: ReturnType<typeof startDeliveryNotificationWorker> | undefined;
   return (
     new Elysia()
       .onStart(async (app) => {
@@ -61,9 +63,13 @@ export function createApp(
         );
 
         driverEvents = await startDriverEvents(process.env.DATABASE_URL as string);
+        if (options.externalIntegrations !== false) deliveryNotifications = startDeliveryNotificationWorker(options.sms, options.emailSender);
         if (options.automation !== false) await startAutomationTasks();
+		
+		console.log(`${process.env.NODE_ENV}: ${process.env.FRONTEND_URL}`);
       })
       .onStop(async () => {
+        await deliveryNotifications?.stop();
         await driverEvents?.stop();
         await events?.stop();
       })
@@ -143,12 +149,12 @@ export function createApp(
         }
       })
 
-      // .onAfterResponse(({ request, set }) => {
-      //   console.log(
-      //     `[${request.method}] ${new URL(request.url).pathname}`,
-      //     `→ ${set.status}`,
-      //   );
-      // })
+       .onAfterResponse(({ request, set }) => {
+         console.log(
+           `[${request.method}] ${new URL(request.url).pathname}`,
+           `→ ${set.status}`,
+         );
+       })
       .guard(
         {
           beforeHandle: async ({

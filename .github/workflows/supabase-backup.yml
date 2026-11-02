@@ -1,0 +1,89 @@
+
+name: Supabase Database Backup
+
+on:
+  schedule:
+    - cron: "0 18 * * *" # 2 AM Philippines time
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Install AWS CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y awscli
+
+      - name: Create backup directory
+        run: mkdir -p backup
+
+      - name: Backup database roles
+        run: |
+          supabase db dump \
+            --db-url "$SUPABASE_DB_URL" \
+            -f backup/roles.sql \
+            --role-only
+
+      - name: Backup database schema
+        run: |
+          supabase db dump \
+            --db-url "$SUPABASE_DB_URL" \
+            -f backup/schema.sql
+
+      - name: Backup database data
+        run: |
+          supabase db dump \
+            --db-url "$SUPABASE_DB_URL" \
+            -f backup/data.sql \
+            --use-copy \
+            --data-only \
+            -x "storage.buckets_vectors" \
+            -x "storage.vector_indexes"
+
+      - name: Upload backups to Cloudflare R2
+        run: |
+          BACKUP_DATE=$(date -u +%Y-%m-%d_%H-%M-%S)
+          BACKUP_PATH="supabase-backups/$BACKUP_DATE"
+
+          aws s3 cp backup/roles.sql \
+            "s3://$R2_BUCKET/$BACKUP_PATH/roles.sql" \
+            --endpoint-url "$R2_ENDPOINT"
+
+          aws s3 cp backup/schema.sql \
+            "s3://$R2_BUCKET/$BACKUP_PATH/schema.sql" \
+            --endpoint-url "$R2_ENDPOINT"
+
+          aws s3 cp backup/data.sql \
+            "s3://$R2_BUCKET/$BACKUP_PATH/data.sql" \
+            --endpoint-url "$R2_ENDPOINT"
+
+          echo "Backup uploaded: $BACKUP_PATH"
+
+      - name: Verify uploaded backup
+        run: |
+          aws s3 ls "s3://$R2_BUCKET/supabase-backups/" \
+            --recursive \
+            --endpoint-url "$R2_ENDPOINT"
