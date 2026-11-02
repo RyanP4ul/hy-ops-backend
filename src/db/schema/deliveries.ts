@@ -2,6 +2,7 @@ import {
   check,
   date,
   integer,
+  numeric,
   pgEnum,
   pgTable,
   text,
@@ -25,10 +26,11 @@ export const deliveries_status = pgEnum("deliveries_status", [
   "scheduled",
   "in_transit",
   "completed",
+  "returning",
   "cancelled",
 ]);
 
-export const deliveries_orders_status = pgEnum("deliveries_orders_status", [
+export const deliveries_stop_status = pgEnum("deliveries_stops_status", [
   "pending",
   "delivered",
   "failed",
@@ -74,7 +76,8 @@ export const deliveries = pgTable(
   ],
 );
 
-export const deliveries_orders = pgTable("deliveries_orders", {
+export const deliveries_stops = pgTable("deliveries_stops", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
   delivery_id: integer()
     .notNull()
     .references(() => deliveries.id, {
@@ -87,13 +90,17 @@ export const deliveries_orders = pgTable("deliveries_orders", {
       onDelete: "cascade",
       onUpdate: "cascade",
     }),
-  status: deliveries_orders_status().notNull().default("pending"),
+  leg_index: integer().notNull().default(0),
+  status: deliveries_stop_status().notNull().default("pending"),
+  latitude: numeric("latitude", { precision: 10, scale: 6 }).notNull(),
+  longitude: numeric("longitude", { precision: 10, scale: 6 }).notNull(),
   delivered_at: timestamp({ withTimezone: true }),
   updated_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
   created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
 });
 
 export const deliveries_event = pgTable("deliveries_event", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
   delivery_id: integer()
     .notNull()
     .references(() => deliveries.id, {
@@ -102,6 +109,60 @@ export const deliveries_event = pgTable("deliveries_event", {
     }),
   event_type: deliveries_event_type("event_type").notNull(),
   reason: text("reason"),
+  updated_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
+});
+
+export const deliveries_expeneses_status_enum = pgEnum(
+  "deliveries_expenses_status",
+  ["pending", "approved", "rejected"],
+);
+
+export const deliveries_expenses = pgTable("deliveries_expenses", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  delivery_id: integer()
+    .notNull()
+    .references(() => deliveries.id, {
+      onDelete: "cascade",
+      onUpdate: "cascade",
+    }),
+  delivery_allowance: numeric("delivery_allowance", {
+    precision: 12,
+    scale: 2,
+  }).notNull(),
+  fuel: numeric("fuel", {
+    precision: 12,
+    scale: 2,
+  }).notNull(),
+  toll: numeric("toll", {
+    precision: 12,
+    scale: 2,
+  }).notNull(),
+  status: deliveries_expeneses_status_enum("status")
+    .notNull()
+    .default("pending"),
+  updated_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
+});
+
+export const deliveries_proof = pgTable("deliveries_proof", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  delivery_id: integer()
+    .notNull()
+    .references(() => deliveries.id, {
+      onDelete: "cascade",
+      onUpdate: "cascade",
+    }),
+  storage_key: varchar("storage_key", {
+    length: 512,
+  })
+    .notNull()
+    .unique(),
+  content_type: varchar("content_type", {
+    length: 128,
+  })
+    .notNull()
+    .default("image/webp"),
   updated_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
   created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
 });

@@ -6,6 +6,8 @@ export type AuthUser = {
   token_version: number;
   user_agent: string;
   iat: number;
+  exp: number;
+  token_type: string;
 };
 
 export type UserAgentInfo = {

@@ -2,7 +2,7 @@ import Elysia, { t, Static } from "elysia";
 
 export const payment_update = t.Object({
   payment_number: t.String({ minLength: 1, maxLength: 32 }),
-  payment_amount: t.Number({ minimum: 0 }),
+  payment_amount: t.Number({ exclusiveMinimum: 0 }),
   version: t.Number({ minimum: 0 }),
 });
 

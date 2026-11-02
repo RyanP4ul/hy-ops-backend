@@ -84,6 +84,20 @@ class TaskManager {
     await this.start(name);
   }
 
+  async updateInterval(name: string, interval: number) {
+    const task = this.getTask(name);
+    task.interval = interval;
+
+    if (task.running) {
+      await this.restart(name);
+    }
+  }
+
+  async runNow(name: string) {
+    const task = this.getTask(name);
+    await this.execute(task, false);
+  }
+
   /**
    * Start every registered task
    */
@@ -105,8 +119,8 @@ class TaskManager {
   /**
    * Execute a task safely
    */
-  private async execute(task: Task) {
-    if (!task.running) {
+  private async execute(task: Task, requireRunning = true) {
+    if (requireRunning && !task.running) {
       return;
     }
 

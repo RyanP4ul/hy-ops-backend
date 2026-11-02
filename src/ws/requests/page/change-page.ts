@@ -1,5 +1,6 @@
 import z from "zod";
 import { RequestBase, Request } from "../request-base";
+import { canSubscribe } from "../../authorization";
 import { TOPIC } from "../../topic";
 
 @Request("CHANGE_PAGE")
@@ -16,12 +17,15 @@ export class ChangePageHandler extends RequestBase<
 
   override execute(): void | Promise<void> {
     const [new_page] = this.data;
+    if (!canSubscribe(this.session.user.role, new_page)) throw new Error("Subscription not permitted.");
 
     if (this.session.page !== new_page) {
       this.session.ws.unsubscribe(this.session.page);
       this.session.page = new_page;
-      this.session.ws.subscribe(this.session.page);
     }
+    // A new session starts on dashboard before it has subscribed to any page.
+    this.session.ws.subscribe(this.session.page);
+    this.write(JSON.stringify({ type: "WS_SUBSCRIBED", payload: { topic: new_page } }));
 
     this.publish(
       {

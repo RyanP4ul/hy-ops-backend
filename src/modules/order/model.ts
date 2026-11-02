@@ -1,12 +1,13 @@
 import Elysia, { Static, t } from "elysia";
 
 export const orderSchema = t.Object({
+  warehouse_id: t.Numeric({ minimum: 1 }),
   customer_id: t.Numeric({ minimum: 1 }),
   notes: t.Optional(t.String()),
   payment_method: t.Union([
     t.Literal("BANK_TRANSFER"),
     t.Literal("CASH"),
-    t.Literal("GCASH"),
+    t.Literal("CARD"),
   ]),
   payment_arrangement: t.Union([
     t.Literal("FULLY_PAID"),
@@ -14,13 +15,20 @@ export const orderSchema = t.Object({
     t.Literal("NET_30"),
   ]),
   amount_paid: t.Numeric({ minimum: 0 }),
+  is_custom_shipping: t.Boolean(),
+  customer_address_id: t.Optional(t.Numeric({ minimum: 1 })),
+  shipping_recipient: t.Optional(t.String({ maxLength: 60 })),
+  shipping_phone: t.Optional(t.String({ maxLength: 20 })),
+  shipping_address: t.Optional(t.String({ maxLength: 255 })),
+  shipping_latitude: t.Optional(t.Number({ minimum: -90, maximum: 90 })),
+  shipping_longitude: t.Optional(t.Number({ minimum: -180, maximum: 180 })),
 });
 
 export type OrderType = Static<typeof orderSchema>;
 
 export const orderItemSchema = t.Object({
   inventory_id: t.Numeric({ minimum: 1 }),
-  quantity: t.Numeric({ minimum: 1 }),
+  quantity: t.Integer({ minimum: 1 }),
 });
 
 export type OrderItemType = Static<typeof orderItemSchema>;
@@ -33,7 +41,7 @@ export const orderUpdateSchema = t.Object({
 export type OrderUpdateType = Static<typeof orderUpdateSchema>;
 
 export const orderItemUpdateSchema = t.Object({
-  quantity: t.Numeric({ minimum: 1 }),
+  quantity: t.Integer({ minimum: 1 }),
 });
 
 export type OrderItemUpdateType = Static<typeof orderItemUpdateSchema>;

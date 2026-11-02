@@ -1,29 +1,39 @@
 import { db } from "..";
-import * as schema from "../../db/schema";
+import { sql } from "drizzle-orm";
 import { tables } from "../table";
-import { orderSeeds } from "./orders";
+
 import { productSeeds } from "./products";
-import { settingSeeds } from "./settings";
 import { userSeeds } from "./users";
+import { settingSeeds } from "./settings";
 import { vehicleSeeds } from "./vehicles";
 import { calendarSeeds } from "./calendar";
+import { automationSeeds } from "./automation";
+// import { orderSeeds } from "./orders";
 
 async function run() {
-  for (const table of Object.keys(tables) as (keyof typeof tables)[]) {
-    try {
-      await db.execute(`TRUNCATE TABLE ${table} RESTART IDENTITY CASCADE`);
-      console.log(`Deleted all records from ${table}`);
-    } catch (error) {
-      console.error(`Error deleting records from ${table}:`, error);
-    }
-  }
+  try {
+    // WARNING: Deletes existing records.
+    for (const table of Object.keys(tables)) {
+      await db.execute(
+        sql`TRUNCATE TABLE ${sql.identifier(table)} RESTART IDENTITY CASCADE`,
+      );
 
-  await productSeeds();
-  await userSeeds();
-  await settingSeeds();
-  await vehicleSeeds();
-  await calendarSeeds();
-  // await orderSeeds();
+      console.log(`Truncated table: ${table}`);
+    }
+
+    await productSeeds();
+    await userSeeds();
+    await settingSeeds();
+    await vehicleSeeds();
+    await calendarSeeds();
+    await automationSeeds();
+    // await orderSeeds();
+
+    console.log("Database seeding completed successfully.");
+  } catch (error) {
+    console.error("Database seeding failed:", error);
+    process.exitCode = 1;
+  }
 }
 
 run();

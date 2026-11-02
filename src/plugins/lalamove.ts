@@ -21,7 +21,6 @@ export async function lalamoveRequest<T>(
   const version = Bun.env.LALAMOVE_VERSION || "v3";
   const signedPath = `/${version}${path}`;
 
-  // The signed path must include the API version.
   const rawSignature =
     `${timestamp}\r\n` +
     `${method.toUpperCase()}\r\n` +
@@ -33,13 +32,14 @@ export async function lalamoveRequest<T>(
     .digest("hex");
 
   const authorization = `hmac ${API_KEY}:${timestamp}:${signature}`;
+  const requestId = randomUUID();
 
   const response = await fetch(`${BASE_URL}${signedPath}`, {
     method,
     headers: {
       Authorization: authorization,
       Market: MARKET,
-      "Request-ID": randomUUID(),
+      "Request-ID": requestId,
       "Content-Type": "application/json",
       Accept: "application/json",
     },
@@ -49,6 +49,14 @@ export async function lalamoveRequest<T>(
   const responseText = await response.text();
 
   if (!response.ok) {
+    console.error("[Lalamove error]", {
+      method,
+      path: signedPath,
+      status: response.status,
+      requestId,
+      response: responseText,
+    });
+
     throw new Error(`Lalamove API error (${response.status}): ${responseText}`);
   }
 

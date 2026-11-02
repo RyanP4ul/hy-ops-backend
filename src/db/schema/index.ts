@@ -1,5 +1,6 @@
 export * from "./archive";
 export * from "./audit_logs";
+export * from "./automation";
 export * from "./calendar";
 export * from "./deliveries";
 export * from "./inventory";
@@ -14,3 +15,13 @@ export * from "./users";
 export * from "./vehicles";
 export * from "./warehouses";
 export * from "./ws";
+
+export * from "./invoice";
+export * from "./stock-movement";
+export * from "./payment-refund";
+export * from "./vehicle-position";
+export * from "./payment-receipt";
+export * from "./driver-outcomes";
+
+export * from "./driver-engagement";
+export * from "./customer-returns";

@@ -1,4 +1,6 @@
 import { db } from "..";
+import { inventory } from "../schema/inventory";
+import { inArray } from "drizzle-orm";
 import { logger } from "../../utils/logger";
 import {
   order_items,
@@ -9,7 +11,7 @@ import {
 
 const now = Math.floor(Date.now() / 1000);
 
-const orderData: OrderInsert[] = [
+const orderData: Omit<OrderInsert, "warehouse_id">[] = [
   {
     customer_id: 1,
     order_number: "ORD-000001",
@@ -67,7 +69,16 @@ const orderItemData: OrderItemInsert[] = [
 export async function orderSeeds() {
   try {
     await db.transaction(async (tx) => {
-      await tx.insert(orders).values(orderData).returning();
+      const stock = await tx.select({ id: inventory.id, warehouse_id: inventory.warehouse_id }).from(inventory)
+        .where(inArray(inventory.id, orderItemData.map((item) => item.inventory_id)));
+      const rows = orderData.map((order, index) => {
+        const items = orderItemData.filter((item) => item.order_id === index + 1);
+        const warehouseIds = new Set(items.map((item) => stock.find((row) => row.id === item.inventory_id)?.warehouse_id));
+        const [warehouse_id] = warehouseIds;
+        if (warehouseIds.size !== 1 || warehouse_id === undefined) throw new Error("Order seed requires existing inventory in a single warehouse per order.");
+        return { ...order, warehouse_id };
+      });
+      await tx.insert(orders).values(rows).returning();
       await tx.insert(order_items).values(orderItemData).returning();
     });
 

@@ -6,8 +6,9 @@ export const productModel = new Elysia().model({
     variants: t.Array(
       t.Object({
         name: t.String({ minLength: 1, maxLength: 60 }),
+        description: t.Optional(t.String({ maxLength: 255 })),
         sku: t.String({ minLength: 1, maxLength: 60 }),
-        price: t.String({ minLength: 1, maxLength: 60 }),
+        price: t.String({ pattern: "^(0|[1-9][0-9]*)(\\.[0-9]{1,2})?$", maxLength: 12 }),
         unit: t.String({ minLength: 1, maxLength: 60 }),
         width_value: t.String({ minLength: 1, maxLength: 60 }),
         width_unit: t.String({ minLength: 1, maxLength: 60 }),
@@ -22,10 +23,11 @@ export const productModel = new Elysia().model({
     name: t.String({ minLength: 1, maxLength: 60 }),
     variants: t.Array(
       t.Object({
-        id: t.Number(),
+        id: t.Optional(t.Number({ minimum: 1 })),
         name: t.String({ minLength: 1, maxLength: 60 }),
+        description: t.Optional(t.String({ maxLength: 255 })),
         sku: t.String({ minLength: 1, maxLength: 60 }),
-        price: t.String({ minLength: 1, maxLength: 60 }),
+        price: t.String({ pattern: "^(0|[1-9][0-9]*)(\\.[0-9]{1,2})?$", maxLength: 12 }),
         unit: t.String({ minLength: 1, maxLength: 60 }),
         width_value: t.String({ minLength: 1, maxLength: 60 }),
         width_unit: t.String({ minLength: 1, maxLength: 60 }),

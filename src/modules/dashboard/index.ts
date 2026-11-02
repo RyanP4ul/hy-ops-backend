@@ -1,18 +1,26 @@
 import Elysia from "elysia";
+import { AuthUser } from "../auth/schema";
+import { staffWarehouse } from "../deliveries/scope";
 import { DashboardService } from "./services";
 import { OrderService } from "../order/service";
 import { DeliveryService } from "../deliveries/service";
-import { CalendarService } from "../calendar/services";
+import { InventoryService } from "../inventory/service";
 
-export const dashboardRoutes = new Elysia({ prefix: "/dashboard" }).get(
+export const dashboardRoutes = new Elysia({ prefix: "/dashboard" })
+.decorate("user", {} as AuthUser)
+.get("/exceptions", async () => {
+  const [operations, stock] = await Promise.all([DashboardService.getExceptions(), InventoryService.getSummary()]);
+  return { ...operations, lowStock: stock.low, outOfStock: stock.out };
+})
+.get(
   "/stats",
-  async ({ set }) => {
+  async ({ set, user }) => {
     const monthly_revenue = await DashboardService.getRevenueByMonth();
     const daily_sales = await DashboardService.getSalesByDay();
     const active_deliveries = await DashboardService.getActiveDeliveries();
     const upcoming_deliveries =
       await DashboardService.getUpcomingDeliveries();
-    const delivery_calendar = await CalendarService.getDeliveryEvents();
+    const delivery_calendar = await DashboardService.getDeliveryCalendar(await staffWarehouse(user));
     const top_selling_products =
       await DashboardService.getTopSellingProducts();
     const top_customers = await DashboardService.getTopCustomers();

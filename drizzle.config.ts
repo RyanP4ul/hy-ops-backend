@@ -1,5 +1,11 @@
 import { defineConfig } from "drizzle-kit";
 
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
+  throw new Error("DATABASE_URL environment variable is not set.");
+}
+
 export default defineConfig({
   dialect: "postgresql",
   strict: true,
@@ -7,7 +13,7 @@ export default defineConfig({
   schema: "./src/db/schema",
   out: "./src/db/migrations",
   dbCredentials: {
-    url: "postgresql://postgres:123@localhost:9519/hyops",
-    ssl: false,
+    url: connectionString,
+    ssl: "require",
   },
 });

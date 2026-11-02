@@ -1,8 +1,8 @@
 import z from "zod";
 import { RequestBase, Request } from "../request-base";
-import { NotificationService } from "../../../modules/notifications/service";
+import { TOPIC } from "../../topic";
 
-@Request("ADD_PRODUCT")
+@Request("PRODUCT_ADDED")
 export class AddProductHandler extends RequestBase<
   typeof AddProductHandler.schema
 > {
@@ -10,13 +10,20 @@ export class AddProductHandler extends RequestBase<
   override skipValidation = false;
 
   override async execute(): Promise<void> {
-    const [meta] = this.data;
+    const [productData] = this.data;
+    const product = JSON.parse(productData);
 
-    await NotificationService.createNotification(
-      this.session.user.id,
-      "Product Added",
-      "Product Desciption Test",
-      meta,
+    if (!product?.id) {
+      throw new Error("Invalid product data provided.");
+    }
+
+    this.publishBySubscribed(
+      {
+        type: "PRODUCT_ADDED",
+        payload: product,
+      },
+      TOPIC.PRODUCTS,
+      [this.session.ws.id],
     );
   }
 }

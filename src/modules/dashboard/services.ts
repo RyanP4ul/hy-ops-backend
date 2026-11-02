@@ -1,16 +1,29 @@
+import { findCashMovements } from "../analysis-reports/repositories/payments.repository";
+import { DEFAULT_FILTERS } from "../analysis-reports/reports.contract";
+import { getDeliveryCalendar } from "../deliveries/calendar";
+import { DAY, dayStart, manilaDay } from "../../utils/time";
+import { sumMoney } from "../analysis-reports/domain/metrics";
 import { db } from "@/db/index";
-import {
-  deliveries,
-  deliveries_orders,
-} from "@/db/schema/deliveries";
+import { deliveries, deliveries_stops } from "@/db/schema/deliveries";
 import { inventory } from "@/db/schema/inventory";
 import { order_items, orders } from "@/db/schema/order";
 import { payments } from "@/db/schema/payment";
 import { product_variants, products } from "@/db/schema/products";
-import { customers, users } from "@/db/schema/users";
+import { customer_addresses, customers, users } from "@/db/schema/users";
 import { and, asc, desc, eq, gte, lt, ne, or, sql } from "drizzle-orm";
 
 export abstract class DashboardService {
+  static async getDeliveryCalendar(warehouseId?: number) {
+    return getDeliveryCalendar(warehouseId);
+  }
+  static async getExceptions() {
+    const [result] = await db.select({
+      overdueDeliveries: sql<number>`count(*) filter (where ${deliveries.status} = 'scheduled' and (${deliveries.scheduled_date} + ${deliveries.departure_time}) at time zone 'Asia/Manila' < now())`.mapWith(Number),
+    }).from(deliveries);
+    const [pending] = await db.select({ count: sql<number>`count(*)`.mapWith(Number) }).from(orders).where(eq(orders.status, "PENDING"));
+    return { ...result, pendingOrders: pending.count };
+  }
+
   static async getUpcomingDeliveries() {
     const now = new Date();
     const today = `${now.getUTCFullYear()}-${String(
@@ -23,21 +36,21 @@ export abstract class DashboardService {
         date: deliveries.scheduled_date,
         time: deliveries.departure_time,
         driver: users.name,
-        customer: sql<string>`coalesce(min(${customers.company_name}), 'Multiple customers')`,
-        destination: sql<string>`coalesce(min(${customers.address}), 'Multiple destinations')`,
+        customer: sql<string>`case when count(distinct ${orders.customer_id}) > 1 then 'Multiple customers' else coalesce(min(${customers.company_name}), 'Customer unavailable') end`,
+        destination: sql<string>`case when count(distinct ${orders.shipping_address}) > 1 then 'Multiple destinations' else coalesce(min(${orders.shipping_address}), 'Destination unavailable') end`,
       })
       .from(deliveries)
       .innerJoin(users, eq(deliveries.driver_id, users.id))
       .leftJoin(
-        deliveries_orders,
-        eq(deliveries.id, deliveries_orders.delivery_id),
+        deliveries_stops,
+        eq(deliveries.id, deliveries_stops.delivery_id),
       )
-      .leftJoin(orders, eq(deliveries_orders.order_id, orders.id))
+      .leftJoin(orders, eq(deliveries_stops.order_id, orders.id))
       .leftJoin(customers, eq(orders.customer_id, customers.id))
       .where(
         and(
           eq(deliveries.status, "scheduled"),
-          gte(deliveries.scheduled_date, today),
+          sql`(${deliveries.scheduled_date} + ${deliveries.departure_time}) at time zone 'Asia/Manila' >= now()`,
         ),
       )
       .groupBy(
@@ -65,21 +78,25 @@ export abstract class DashboardService {
         id: deliveries.id,
         driver: users.name,
         status: deliveries.status,
-        customer: sql<string>`coalesce(min(${customers.company_name}), 'Multiple customers')`,
-        destination: sql<string>`coalesce(min(${customers.address}), 'Multiple destinations')`,
-        delivered: sql<number>`count(*) filter (where ${deliveries_orders.status} = 'delivered')`,
-        stops: sql<number>`count(${deliveries_orders.order_id})`,
+        customer: sql<string>`case when count(distinct ${orders.customer_id}) > 1 then 'Multiple customers' else coalesce(min(${customers.company_name}), 'Customer unavailable') end`,
+        destination: sql<string>`case when count(distinct ${orders.shipping_address}) > 1 then 'Multiple destinations' else coalesce(min(${orders.shipping_address}), 'Destination unavailable') end`,
+        delivered: sql<number>`count(*) filter (where ${deliveries_stops.status} = 'delivered')`,
+        stops: sql<number>`count(${deliveries_stops.order_id})`,
       })
       .from(deliveries)
       .innerJoin(users, eq(deliveries.driver_id, users.id))
       .leftJoin(
-        deliveries_orders,
-        eq(deliveries.id, deliveries_orders.delivery_id),
+        deliveries_stops,
+        eq(deliveries.id, deliveries_stops.delivery_id),
       )
-      .leftJoin(orders, eq(deliveries_orders.order_id, orders.id))
+      .leftJoin(orders, eq(deliveries_stops.order_id, orders.id))
       .leftJoin(customers, eq(orders.customer_id, customers.id))
       .where(
-        or(eq(deliveries.status, "scheduled"), eq(deliveries.status, "in_transit")),
+        or(
+          eq(deliveries.status, "scheduled"),
+          eq(deliveries.status, "in_transit"),
+          eq(deliveries.status, "returning"),
+        ),
       )
       .groupBy(deliveries.id, users.name, deliveries.status)
       .orderBy(asc(deliveries.scheduled_date), asc(deliveries.departure_time))
@@ -101,19 +118,19 @@ export abstract class DashboardService {
         name: product_variants.name,
         sku: product_variants.sku,
         sold: sql<number>`coalesce(sum(${order_items.quantity}), 0)`,
-        revenue: sql<string>`coalesce(sum(${order_items.quantity} * ${product_variants.price}), 0)`,
+        revenue: sql<string | null>`case
+          when bool_and(${order_items.unit_price_snapshot} is not null)
+          then sum(${order_items.quantity} * ${order_items.unit_price_snapshot})::text
+          else null
+        end`,
       })
       .from(order_items)
       .innerJoin(orders, eq(order_items.order_id, orders.id))
-      .innerJoin(
-        inventory,
-        eq(order_items.inventory_id, inventory.id),
-      )
+      .innerJoin(inventory, eq(order_items.inventory_id, inventory.id))
       .innerJoin(
         product_variants,
         eq(inventory.product_variant_id, product_variants.id),
       )
-      .innerJoin(products, eq(product_variants.product_id, products.id))
       .where(ne(orders.status, "CANCELLED"))
       .groupBy(product_variants.id, product_variants.name, product_variants.sku)
       .orderBy(desc(sql`sum(${order_items.quantity})`))
@@ -125,8 +142,9 @@ export abstract class DashboardService {
       name: result.name,
       sku: result.sku,
       sold: Number(result.sold),
-      revenue: Number(result.revenue),
-      percent: maxSold > 0 ? Math.round((Number(result.sold) / maxSold) * 100) : 0,
+      revenue: result.revenue === null ? null : Number(result.revenue),
+      percent:
+        maxSold > 0 ? Math.round((Number(result.sold) / maxSold) * 100) : 0,
     }));
   }
 
@@ -134,20 +152,32 @@ export abstract class DashboardService {
     const results = await db
       .select({
         name: customers.company_name,
-        location: customers.address,
+        location: sql<string>`coalesce((
+          select concat_ws(
+            ', ',
+            ${customer_addresses.address_line},
+            ${customer_addresses.barangay},
+            ${customer_addresses.city_municipality},
+            ${customer_addresses.province},
+            ${customer_addresses.postal_code}
+          )
+          from ${customer_addresses}
+          where ${customer_addresses.customer_id} = ${customers.id}
+          order by ${customer_addresses.id}
+          limit 1
+        ), 'No address on file')`,
         orders: sql<number>`count(distinct ${orders.id})`,
-        amount: sql<string>`coalesce(sum(${order_items.quantity} * ${product_variants.price}), 0)`,
+        amount: sql<string | null>`case
+          when count(${order_items.id}) = 0 or bool_and(${order_items.unit_price_snapshot} is not null)
+          then coalesce(sum(${order_items.quantity} * ${order_items.unit_price_snapshot}), 0)::text
+          else null
+        end`,
       })
       .from(orders)
       .innerJoin(customers, eq(orders.customer_id, customers.id))
       .leftJoin(order_items, eq(order_items.order_id, orders.id))
-      .leftJoin(inventory, eq(order_items.inventory_id, inventory.id))
-      .leftJoin(
-        product_variants,
-        eq(inventory.product_variant_id, product_variants.id),
-      )
       .where(ne(orders.status, "CANCELLED"))
-      .groupBy(customers.id, customers.company_name, customers.address)
+      .groupBy(customers.id, customers.company_name)
       .orderBy(desc(sql`count(distinct ${orders.id})`))
       .limit(5);
 
@@ -157,145 +187,27 @@ export abstract class DashboardService {
       name: result.name,
       location: result.location,
       orders: Number(result.orders),
-      amount: Number(result.amount),
+      amount: result.amount === null ? null : Number(result.amount),
       percent:
-        maxOrders > 0 ? Math.round((Number(result.orders) / maxOrders) * 100) : 0,
+        maxOrders > 0
+          ? Math.round((Number(result.orders) / maxOrders) * 100)
+          : 0,
     }));
   }
 
   static async getSalesByDay() {
-    const now = new Date();
-    const today = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-    );
-    const startOfRange = new Date(
-      Date.UTC(
-        today.getUTCFullYear(),
-        today.getUTCMonth(),
-        today.getUTCDate() - 6,
-      ),
-    );
-    const startOfNextDay = new Date(
-      Date.UTC(
-        today.getUTCFullYear(),
-        today.getUTCMonth(),
-        today.getUTCDate() + 1,
-      ),
-    );
-
-    const results = await db
-      .select({
-        day: sql<string>`to_char(date_trunc('day', ${payments.received_at} AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`,
-        sales: sql<string>`coalesce(sum(${payments.amount}), 0)`,
-      })
-      .from(payments)
-      .where(
-        and(
-          gte(payments.received_at, startOfRange),
-          lt(payments.received_at, startOfNextDay),
-          or(
-            eq(payments.payment_status, "PAID"),
-            eq(payments.payment_status, "PARTIALLY_PAID"),
-          ),
-        ),
-      )
-      .groupBy(
-        sql`date_trunc('day', ${payments.received_at} AT TIME ZONE 'UTC')`,
-      )
-      .orderBy(
-        sql`date_trunc('day', ${payments.received_at} AT TIME ZONE 'UTC')`,
-      );
-
-    const salesByDay = new Map(
-      results.map((result) => [result.day, Number(result.sales)]),
-    );
-
-    return Array.from({ length: 7 }, (_, index) => {
-      const day = new Date(
-        Date.UTC(
-          startOfRange.getUTCFullYear(),
-          startOfRange.getUTCMonth(),
-          startOfRange.getUTCDate() + index,
-        ),
-      );
-      const dayKey = day.toISOString().slice(0, 10);
-
-      return {
-        day: day.toLocaleString("en-US", {
-          weekday: "short",
-          timeZone: "UTC",
-        }),
-        sales: salesByDay.get(dayKey) ?? 0,
-      };
+    const end = dayStart(manilaDay(Date.now())) + DAY; const start = end - 7 * DAY;
+    const movements = await findCashMovements(DEFAULT_FILTERS, { start, end });
+    return Array.from({ length: 7 }, (_, i) => {
+      const instant = start + i * DAY; const key = manilaDay(instant);
+      return { day: new Date(instant).toLocaleDateString("en-US", { weekday: "short", timeZone: "Asia/Manila" }), sales: sumMoney(movements.filter((p) => manilaDay(p.at) === key), (p) => p.amount) };
     });
   }
-
   static async getRevenueByMonth() {
-    const now = new Date();
-    const currentMonth = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
-    );
-    const startOfRange = new Date(
-      Date.UTC(
-        currentMonth.getUTCFullYear(),
-        currentMonth.getUTCMonth() - 5,
-        1,
-      ),
-    );
-    const startOfNextMonth = new Date(
-      Date.UTC(
-        currentMonth.getUTCFullYear(),
-        currentMonth.getUTCMonth() + 1,
-        1,
-      ),
-    );
-
-    const results = await db
-      .select({
-        month: sql<string>`to_char(date_trunc('month', ${payments.received_at} AT TIME ZONE 'UTC'), 'YYYY-MM')`,
-        revenue: sql<string>`coalesce(sum(${payments.amount}), 0)`,
-      })
-      .from(payments)
-      .where(
-        and(
-          gte(payments.received_at, startOfRange),
-          lt(payments.received_at, startOfNextMonth),
-          or(
-            eq(payments.payment_status, "PAID"),
-            eq(payments.payment_status, "PARTIALLY_PAID"),
-          ),
-        ),
-      )
-      .groupBy(
-        sql`date_trunc('month', ${payments.received_at} AT TIME ZONE 'UTC')`,
-      )
-      .orderBy(
-        sql`date_trunc('month', ${payments.received_at} AT TIME ZONE 'UTC')`,
-      );
-
-    const revenueByMonth = new Map(
-      results.map((result) => [result.month, Number(result.revenue)]),
-    );
-
-    return Array.from({ length: 6 }, (_, index) => {
-      const month = new Date(
-        Date.UTC(
-          startOfRange.getUTCFullYear(),
-          startOfRange.getUTCMonth() + index,
-          1,
-        ),
-      );
-      const monthKey = `${month.getUTCFullYear()}-${String(
-        month.getUTCMonth() + 1,
-      ).padStart(2, "0")}`;
-
-      return {
-        month: month.toLocaleString("en-US", {
-          month: "short",
-          timeZone: "UTC",
-        }),
-        revenue: revenueByMonth.get(monthKey) ?? 0,
-      };
-    });
+    const today = manilaDay(Date.now()); const year = Number(today.slice(0, 4)), month = Number(today.slice(5, 7)) - 1;
+    const keys = Array.from({ length: 6 }, (_, i) => new Date(Date.UTC(year, month - 5 + i, 1)).toISOString().slice(0, 7));
+    const start = dayStart(`${keys[0]}-01`); const end = dayStart(new Date(Date.UTC(year, month + 1, 1)).toISOString().slice(0, 10));
+    const movements = await findCashMovements(DEFAULT_FILTERS, { start, end });
+    return keys.map((key) => ({ month: new Date(`${key}-01T00:00:00+08:00`).toLocaleDateString("en-US", { month: "short", timeZone: "Asia/Manila" }), revenue: sumMoney(movements.filter((p) => manilaDay(p.at).startsWith(key)), (p) => p.amount) }));
   }
 }

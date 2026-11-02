@@ -1,5 +1,6 @@
 import { archives } from "./schema/archive";
 import { audit_logs } from "./schema/audit_logs";
+import { automations } from "./schema/automation";
 import { inventory } from "./schema/inventory";
 import { products } from "./schema/products";
 import { settings } from "./schema/settings";
@@ -11,6 +12,7 @@ import { ws_logs } from "./schema/ws";
 
 export const tables = {
   archives,
+  automations,
   inventory,
   audit_logs,
   order_items,

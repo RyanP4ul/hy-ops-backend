@@ -5,6 +5,9 @@ import { UserSelect } from "../db/schema/users";
 export const createAccessToken = async (jwt: any, user: UserSelect) => {
   return await jwt.sign({
     sub: String(user.id),
+    token_type: "access",
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + configCookie.ACCESS_TOKEN_EXPIRATION,
     email: user.email,
     name: user.name,
     role: user.role,
@@ -15,6 +18,10 @@ export const createAccessToken = async (jwt: any, user: UserSelect) => {
 export const createRefreshToken = async (jwt: any, user: UserSelect) => {
   return await jwt.sign({
     sub: String(user.id),
+    token_type: "refresh",
+    jti: crypto.randomUUID(),
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + configCookie.REFRESH_TOKEN_EXPIRATION,
     token_version: user.token_version,
   });
 };

@@ -15,14 +15,14 @@ export class CreateNotificationHandler extends RequestBase<
   override skipValidation = false;
 
   override async execute(): Promise<void> {
-    const user_id = this.session.user.id;
+    const user_id = Number(this.session.user.sub);
     const [title, message, is_global, metadata] = this.data;
 
     await NotificationService.createNotification(
       user_id,
       title,
       message,
-      metadata,
+      metadata ?? "info",
     );
   }
 }

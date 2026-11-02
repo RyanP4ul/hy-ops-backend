@@ -1,10 +1,15 @@
 import Elysia, { t } from "elysia";
 import { orderModel } from "./model";
-import { OrderService } from "./service";
+import {
+  CustomerOrderLimitReachedError,
+  OrderService,
+} from "./service";
 import { AuthUser } from "../auth/schema";
+import { staffWarehouse, assertOrderScope } from "../deliveries/scope";
+import { WorkflowError } from "../../utils/workflow-error";
 
 export const orderRoutes = new Elysia({ prefix: "/orders" })
-  .decorate("user", AuthUser)
+  .decorate("user", {} as AuthUser)
   .use(orderModel)
   .get("/", async ({ query, set }) => {
     const page = query.page ? parseInt(query.page) : 0;
@@ -19,6 +24,7 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
       search,
       delivery_type,
       sort_by,
+      query.status ?? "",
     );
 
     set.headers["X-Total-Count"] = result.total;
@@ -31,14 +37,14 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
       const orderDetail = await OrderService.getOrderById(params.id);
 
       if (!orderDetail) {
-        return { error: "Order not found" };
+        throw new WorkflowError("Order not found.", 404);
       }
 
       return orderDetail;
     },
     {
       params: t.Object({
-        id: t.Number(),
+        id: t.Numeric({ minimum: 1 }),
       }),
     },
   )
@@ -46,10 +52,42 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     const order_ids = query.ids ? query.ids.split(",").map(Number) : [];
     return await OrderService.getOrderDetailsByIds(order_ids);
   })
+  .get(
+    "/eligibility/:customerId",
+    ({ params }) =>
+      OrderService.getCustomerOrderEligibility(params.customerId),
+    {
+      params: t.Object({ customerId: t.Numeric({ minimum: 1 }) }),
+    },
+  )
+  .put("/:id", ({ params, body }) => OrderService.updateNotes(params.id, body.version, body.notes), {
+    params: t.Object({ id: t.Numeric({ minimum: 1 }) }), body: t.Object({ version: t.Integer({ minimum: 1 }), notes: t.String({ maxLength: 2000 }) }),
+  })
+  .put("/:id/destination", async ({ params, body, user }) => { await assertOrderScope(params.id, await staffWarehouse(user)); return OrderService.setDestination(params.id, body.version, body.latitude, body.longitude); }, {
+    params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+    body: t.Object({ version: t.Integer({ minimum: 1 }), latitude: t.Number({ minimum: -90, maximum: 90 }), longitude: t.Number({ minimum: -180, maximum: 180 }) }),
+  })
   .post(
     "/",
-    async ({ body }) => {
-      return await OrderService.createOrder(body);
+    async ({ body, set }) => {
+      try {
+        const result = await OrderService.createOrder(body);
+        const order = await OrderService.getOrderTableRowById(result.id);
+
+        if (!order) throw new Error("Failed to load created order.");
+
+        return order;
+      } catch (error) {
+        if (error instanceof CustomerOrderLimitReachedError) {
+          set.status = 409;
+          return {
+            ...error.eligibility,
+            code: error.code,
+            message: error.message,
+          };
+        }
+        throw error;
+      }
     },
     {
       body: "order.create",
@@ -57,53 +95,73 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   )
   .post(
     "/process/:id",
-    async ({ query, params }) =>
-      await OrderService.processOrder(params.id, query.version),
+    async ({ query, params }) => {
+      const result = await OrderService.processOrder(params.id, query.version);
+      const order = await OrderService.getOrderTableRowById(result.id);
+
+      if (!order) throw new Error("Failed to load processed order.");
+
+      return order;
+    },
     {
       query: t.Object({
-        version: t.Number(),
+        version: t.Numeric({ minimum: 1 }),
       }),
       params: t.Object({
-        id: t.Number(),
+        id: t.Numeric({ minimum: 1 }),
       }),
     },
   )
   .post(
     "/delivery/:id",
-    async ({ query, params }) =>
-      await OrderService.deliveryOrder(params.id, query.version),
+    async ({ query, params }) => {
+      const result = await OrderService.deliveryOrder(params.id, query.version);
+      const order = await OrderService.getOrderTableRowById(result.id);
+
+      if (!order) throw new Error("Failed to load delivery-ready order.");
+
+      return order;
+    },
     {
       query: t.Object({
-        version: t.Number(),
+        version: t.Numeric({ minimum: 1 }),
       }),
       params: t.Object({
-        id: t.Number(),
+        id: t.Numeric({ minimum: 1 }),
       }),
     },
   )
   .post(
     "/cancel/:id",
-    async ({ query, params }) =>
-      await OrderService.cancelOrder(params.id, query.version),
+    async ({ query, params }) => {
+      const result = await OrderService.cancelOrder(params.id, query.version);
+      const order = await OrderService.getOrderTableRowById(result.id);
+
+      if (!order) throw new Error("Failed to load cancelled order.");
+
+      return order;
+    },
     {
       query: t.Object({
-        version: t.Number(),
+        version: t.Numeric({ minimum: 1 }),
       }),
       params: t.Object({
-        id: t.Number(),
+        id: t.Numeric({ minimum: 1 }),
       }),
     },
   )
   // getAllOrderForCombobox
-  .get("/cb", async ({ query }) => {
+  .get("/cb", async ({ query, user }) => {
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;
     const search = query.search ? query.search.trim() : "";
+    const warehouse_id = await staffWarehouse(user) ?? (query.warehouse_id ? parseInt(query.warehouse_id) : -1);
 
     const result = await OrderService.getAllOrderForCombobox(
       page,
       limit,
       search,
+      warehouse_id,
     );
 
     return result;

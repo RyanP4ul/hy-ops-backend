@@ -1,8 +1,10 @@
 import { sql } from "drizzle-orm";
+import { warehouses } from "./warehouses";
 import { inventory } from "./inventory";
 import { products } from "./products";
 import { customers, users } from "./users";
 import {
+  boolean,
   integer,
   pgTable,
   text,
@@ -20,7 +22,6 @@ export const order_status = pgEnum("order_status", [
   "PENDING",
   "PROCESSING",
   "SCHEDULING",
-  "READY_FOR_DELIVERY",
   "SCHEDULED",
   "IN_TRANSIT",
   "COMPLETED",
@@ -41,6 +42,12 @@ export const orders = pgTable("orders", {
   })
     .notNull()
     .unique(),
+  warehouse_id: integer("warehouse_id")
+    .notNull()
+    .references(() => warehouses.id, {
+      onDelete: "restrict",
+      onUpdate: "cascade",
+    }),
   customer_id: integer("customer_id")
     .notNull()
     .references(() => customers.id, {
@@ -51,11 +58,15 @@ export const orders = pgTable("orders", {
     "NET_30",
   ),
   notes: text("notes"),
+  stock_reserved: boolean("stock_reserved").notNull().default(false),
   status: order_status("status").notNull().default("PENDING"),
 
   shipping_recipient: text("shipping_recipient"),
   shipping_phone: text("shipping_phone"),
   shipping_address: text("shipping_address"),
+  shipping_latitude: numeric("shipping_latitude", { precision: 10, scale: 6 }),
+  shipping_longitude: numeric("shipping_longitude", { precision: 10, scale: 6 }),
+  shipping_address_source_id: integer("shipping_address_source_id"),
 
   version: integer("version").notNull().default(1),
 
@@ -80,6 +91,13 @@ export const order_items = pgTable(
         onUpdate: "cascade",
       }),
     quantity: integer("quantity").notNull(),
+    unit_price_snapshot: numeric("unit_price_snapshot", {
+      precision: 10,
+      scale: 2,
+    }),
+    price_source: varchar("price_source", { length: 32 })
+      .notNull()
+      .default("legacy_unknown"),
     created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

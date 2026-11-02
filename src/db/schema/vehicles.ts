@@ -1,4 +1,5 @@
 import { integer, pgEnum, pgTable, varchar } from "drizzle-orm/pg-core";
+import { warehouses } from "./warehouses";
 
 export const vehicleStatusEnum = pgEnum("vehicle_status_enum", [
   "available",
@@ -15,6 +16,12 @@ export const vehicleTypeEnum = pgEnum("vehicle_type_enum", [
 
 export const vehicles = pgTable("vehicles", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  warehouse_id: integer()
+    .notNull()
+    .references(() => warehouses.id, {
+      onDelete: "cascade",
+      onUpdate: "cascade",
+    }),
   plate_number: varchar({ length: 255 }).notNull().unique(),
   status: vehicleStatusEnum().notNull().default("available"),
   type: vehicleTypeEnum().notNull().default("truck"),

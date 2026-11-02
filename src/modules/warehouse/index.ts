@@ -1,3 +1,7 @@
+import { staffWarehouse } from "../deliveries/scope";
+import { db } from "../../db";
+import { warehouses } from "../../db/schema/warehouses";
+import { eq } from "drizzle-orm";
 import { logger } from "../../utils/logger";
 import { ArchiveService } from "../archives/service";
 import { AuthUser } from "../auth/schema";
@@ -7,7 +11,7 @@ import Elysia, { t } from "elysia";
 
 export const warehouseRoutes = new Elysia({ prefix: "/warehouses" })
   .use(warehouseModel)
-  .decorate("user", AuthUser)
+  .decorate("user", {} as AuthUser)
   .get("/", async ({ query, set }) => {
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;
@@ -23,7 +27,12 @@ export const warehouseRoutes = new Elysia({ prefix: "/warehouses" })
     set.headers["X-Total-Count"] = result.total;
     return result.rows;
   })
-  .get("/names", async ({ query, set }) => {
+  .get("/names", async ({ query, set, user }) => {
+    const scope = await staffWarehouse(user);
+    if (scope !== undefined) {
+      const rows = await db.select().from(warehouses).where(eq(warehouses.id, scope));
+      return { rows, total: rows.length };
+    }
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;
     const search = query.search ? query.search.trim() : "";

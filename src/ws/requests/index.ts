@@ -13,6 +13,26 @@ import "./product/add-product-request";
 import "./product/delete-product-request";
 import "./product/update-product-request";
 
+// INVENTORY REQUESTS
+import "./inventory/add-inventory-request";
+import "./inventory/update-inventory-request";
+import "./inventory/delete-inventory-request";
+
+// DELIVERY SCHEDULE REQUESTS
+import "./delivery-schedules/schedule-created-request";
+
+// PAYMENT REQUESTS
+import "./payments/payment-updated-request";
+
+// DELIVERY REQUESTS
+import "./deliveries/delivery-created-request";
+import "./deliveries/delivery-updated-request";
+
+// VEHICLE REQUESTS
+import "./vehicles/vehicle-add-request";
+import "./vehicles/vehicle-update-request";
+import "./vehicles/vehicle-delete-request";
+
 // WAREHOUSE REQUESTS
 import "./warehouses/warehouse-add-request";
 import "./warehouses/warehouse-archive-request";

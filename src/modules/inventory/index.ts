@@ -1,9 +1,21 @@
 import { Elysia, t } from "elysia";
 import { InventoryService } from "./service";
 import { inventory_stock_status, inventoryModel } from "./model";
+import { AuthUser } from "../auth/schema";
+import { previewReconciliation, reconcileReservations } from "./reconciliation";
 
 export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
+  .decorate("user", AuthUser)
   .use(inventoryModel)
+  .get("/reconciliation", () => previewReconciliation())
+  .post("/reconciliation", ({ body, user }) => reconcileReservations(body.token, body.reason, Number(user.sub)), {
+    body: t.Object({ token: t.String({ minLength: 64, maxLength: 64 }), reason: t.String({ minLength: 1, maxLength: 500 }) }),
+  })
+  .get("/:id/movements", ({ params }) => InventoryService.getMovements(params.id), { params: t.Object({ id: t.Numeric({ minimum: 1 }) }) })
+  .get("/reorder", ({ query }) => InventoryService.getReorderSuggestions(query.warehouse_id ?? null), { query: t.Object({ warehouse_id: t.Optional(t.Numeric({ minimum: 1 })) }) })
+  .get("/summary", ({ query }) => InventoryService.getSummary(query.warehouse_id ? Number(query.warehouse_id) : null), {
+    query: t.Object({ warehouse_id: t.Optional(t.Numeric({ minimum: 1 })) }),
+  })
   .get("/", async ({ query, set }) => {
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;
@@ -42,9 +54,17 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
   .post(
     "/",
     async ({ body }) => {
-      return await InventoryService.createInventory({
+      const result = await InventoryService.createInventory({
         ...body,
       });
+
+      const inventory = await InventoryService.getInventoryTableRowById(
+        result[0].id,
+      );
+
+      if (!inventory) throw new Error("Failed to load created inventory.");
+
+      return inventory;
     },
     {
       body: "inventory.create",
@@ -52,12 +72,18 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
   )
   .put(
     "/:id",
-    async ({ params, body }) => {
+    async ({ params, body, user }) => {
       const id = parseInt(params.id);
 
-      return await InventoryService.updateInventory(id, {
+      await InventoryService.updateInventory(id, {
         ...body,
-      });
+      }, Number(user.sub));
+
+      const inventory = await InventoryService.getInventoryTableRowById(id);
+
+      if (!inventory) throw new Error("Failed to load updated inventory.");
+
+      return inventory;
     },
     {
       body: "inventory.update",
@@ -69,8 +95,11 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
 
     return await InventoryService.deleteInventory(id, version);
   })
-  .get("/names", async () => {
-    return await InventoryService.getInventoryNames();
+  .get("/names", async ({ query }) => {
+    const page = query.page ? parseInt(query.page) : 0;
+    let limit = query.limit ? parseInt(query.limit) : 10;
+    const warehouse_id = query.warehouse_id ? parseInt(query.warehouse_id) : -1;
+    return await InventoryService.getInventoryNames(page, limit, warehouse_id);
   })
   .get("/details", async ({ query }) => {
     const order_ids = query.ids ? query.ids.split(",").map(Number) : [];

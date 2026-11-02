@@ -4,7 +4,9 @@ import {
   varchar,
   pgEnum,
   boolean,
+  timestamp,
 } from "drizzle-orm/pg-core";
+import { warehouses } from "./warehouses";
 
 export const roleEnums = pgEnum("role", [
   "admin",
@@ -46,6 +48,25 @@ export type UserRole = (typeof roleEnums.enumValues)[number];
 export type UserInsert = typeof users.$inferInsert;
 export type UserSelect = typeof users.$inferSelect;
 
+export const staffs = pgTable("staffs", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  user_id: integer()
+    .notNull()
+    .references(() => users.id, {
+      onDelete: "cascade",
+      onUpdate: "cascade",
+    }),
+  warehouse_id: integer()
+    .notNull()
+    .references(() => warehouses.id, {
+      onDelete: "cascade",
+      onUpdate: "cascade",
+    }),
+});
+
+export type StaffInsert = typeof staffs.$inferInsert;
+export type StaffSelect = typeof staffs.$inferSelect;
+
 export const customers = pgTable("customers", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   user_id: integer()
@@ -55,8 +76,26 @@ export const customers = pgTable("customers", {
       onUpdate: "cascade",
     }),
   company_name: varchar().notNull().default("none"),
-  address: varchar().notNull(),
   phone_number: varchar().notNull(),
+});
+
+export const customer_addresses = pgTable("customer_addresses", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  customer_id: integer()
+    .notNull()
+    .references(() => customers.id, {
+      onDelete: "cascade",
+      onUpdate: "cascade",
+    }),
+  address_line: varchar().notNull(),
+  barangay: varchar().notNull(),
+  city_municipality: varchar().notNull(),
+  province: varchar().notNull(),
+  postal_code: varchar(),
+  latitude: varchar(),
+  longitude: varchar(),
+  created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  updated_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
 });
 
 export type CustomerInsert = typeof customers.$inferInsert;
@@ -67,6 +106,12 @@ export const drivers = pgTable("drivers", {
   user_id: integer()
     .notNull()
     .references(() => users.id, {
+      onDelete: "cascade",
+      onUpdate: "cascade",
+    }),
+  warehouse_id: integer()
+    .notNull()
+    .references(() => warehouses.id, {
       onDelete: "cascade",
       onUpdate: "cascade",
     }),

@@ -65,6 +65,7 @@ function formatDate(): string {
 }
 
 function log(level: LogLevel, ...messages: string[]): void {
+  if ((level === "debug" || level === "silly") && process.env.NODE_ENV !== "development") return;
   const config = logConfigs[level];
   const timestamp = formatDate();
   const prefix = `${colors.gray}[${timestamp}]${colors.reset} ${config.color}${colors.bright}[${config.prefix}]${colors.reset}`;

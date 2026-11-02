@@ -1,0 +1,10 @@
+import { fixtureEnvironment } from "./environment";
+fixtureEnvironment();
+console.info("Loading isolated live fixture application...");
+const { createApp }: typeof import("../../src/app") = require("../../src/app");
+console.info("Live fixture application loaded.");
+const port = Number(process.env.HYOPS_FIXTURE_PORT);
+if (![5180, 5181].includes(port)) throw new Error("Unexpected fixture port.");
+const app = createApp({ automation: false, externalIntegrations: false }).listen({ hostname: "127.0.0.1", port });
+console.info(`Live fixture listening on ${port}.`);
+process.on("SIGTERM", async () => { await app.stop(); process.exit(0); });

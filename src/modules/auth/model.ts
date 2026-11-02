@@ -5,6 +5,7 @@ export const LoginModel = {
   login: t.Object({
     email: t.String({ format: "email" }),
     password: t.String({ minLength: 6 }),
+    is_mobile: t.Boolean(),
   }),
 };
 
@@ -16,9 +17,13 @@ export interface AccessTokenPayloadModel {
   name: string;
   role: UserRole;
   token_version: number;
+  token_type: string;
+  exp: number;
 }
 
 export interface RefreshTokenPayloadModel {
   sub: string;
   token_version: number;
+  token_type: string;
+  exp: number;
 }

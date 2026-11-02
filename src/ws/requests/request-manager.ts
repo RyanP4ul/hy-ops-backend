@@ -21,25 +21,27 @@ export class RequestManager {
     session: Session,
     requestName: string,
     params: any[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     logger.silly(
-      `Handling request: ${requestName} with params: ${JSON.stringify(params)}`,
+      `Handling request: ${requestName} ${JSON.stringify(params)}`,
     );
 
     const requestClass = this.requests.get(requestName);
 
     if (!requestClass) {
       logger.error(`Unknown request: ${requestName}`);
-      return;
+      return false;
     }
 
     try {
       const request = new requestClass(session, params);
       await request.execute();
+      return true;
     } catch (error) {
       if (error instanceof Error) {
         logger.error(`Error executing request ${requestName}:`, error.message);
       }
+      return false;
     }
   }
 }

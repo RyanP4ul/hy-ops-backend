@@ -21,6 +21,7 @@ export const productRoutes = new Elysia({ prefix: "/products" })
       page,
       limit,
       search,
+      query.variants ?? "all",
     );
 
     set.headers["X-Total-Count"] = products.total;
@@ -45,7 +46,7 @@ export const productRoutes = new Elysia({ prefix: "/products" })
     },
     {
       params: t.Object({
-        id: t.Number({ minimum: 1, max: 10 }),
+        id: t.Numeric({ minimum: 1 }),
       }),
     },
   )
@@ -71,10 +72,10 @@ export const productRoutes = new Elysia({ prefix: "/products" })
     },
     {
       params: t.Object({
-        variant_id: t.Number({ minimum: 1, max: 10 }),
+        variant_id: t.Numeric({ minimum: 1 }),
       }),
       query: t.Object({
-        product_id: t.Number({ minimum: 1, max: 10 }),
+        product_id: t.Numeric({ minimum: 1 }),
       }),
     },
   )
@@ -100,6 +101,10 @@ export const productRoutes = new Elysia({ prefix: "/products" })
 
       if (!result) throw new Error("Failed to create product");
 
+      const product = await ProductService.getProductById(result.product.id);
+
+      if (!product) throw new Error("Failed to load created product");
+
       // await NotificationService.createNotification(
       //   user.sub,
       //   "Product Created",
@@ -107,7 +112,7 @@ export const productRoutes = new Elysia({ prefix: "/products" })
       //   JSON.stringify(body),
       // );
 
-      return result;
+      return product;
     },
     {
       body: "product.create",
@@ -159,7 +164,16 @@ export const productRoutes = new Elysia({ prefix: "/products" })
         };
       }
 
-      return result;
+      const updatedProduct = await ProductService.getProductById(productId);
+
+      if (!updatedProduct) {
+        set.status = 500;
+        return {
+          error: "Product was updated but could not be loaded.",
+        };
+      }
+
+      return updatedProduct;
     },
     {
       body: "product.update",

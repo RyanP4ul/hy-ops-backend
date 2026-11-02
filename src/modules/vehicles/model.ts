@@ -1,6 +1,7 @@
 import Elysia, { Static, t } from "elysia";
 
 const vehicleSchema = t.Object({
+  warehouse_id: t.Numeric({ minimum: 1 }),
   plate_number: t.String({ minLength: 1, maxLength: 255 }),
   status: t.Union([
     t.Literal("available"),
@@ -9,7 +10,7 @@ const vehicleSchema = t.Object({
     t.Literal("on_delivery"),
   ]),
   type: t.Union([t.Literal("truck"), t.Literal("van"), t.Literal("other")]),
-  image: t.String({ minLength: 1, maxLength: 255 }),
+  image: t.String({ minLength: 0, maxLength: 255 }),
 });
 
 export type VehicleType = Static<typeof vehicleSchema>;

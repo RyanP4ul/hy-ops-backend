@@ -1,9 +1,16 @@
 import { Elysia, t } from "elysia";
 import { PaymentService } from "./service";
+import { AuthUser } from "../auth/schema";
 import { paymentCreate } from "./model";
 
 export const paymentRoutes = new Elysia({ prefix: "/payments" })
+  .decorate("user", AuthUser)
   .use(paymentCreate)
+  .get("/:number/refunds", ({ params }) => PaymentService.getRefunds(params.number))
+  .post("/refunds", async ({ body, user }) => {
+    const result = await PaymentService.refund(body, Number(user.sub));
+    return { ...result, payment: await PaymentService.getPaymentTableRowByNumber(result.payment_number) };
+  }, { body: t.Object({ payment_number: t.String(), amount: t.Number({ exclusiveMinimum: 0 }), version: t.Integer({ minimum: 1 }), reason: t.String({ minLength: 1, maxLength: 500 }), request_id: t.String({ format: "uuid" }) }) })
   .get("/", async ({ query, set }) => {
     const result = await PaymentService.getPayments(
       query.page ? Number(query.page) : 0,
@@ -14,6 +21,17 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
     set.headers["X-Total-Count"] = result.total;
     return result.rows;
   })
-  .post("/", async ({ body }) => PaymentService.updatePayment(body), {
+  .post("/", async ({ body }) => {
+    const result = await PaymentService.updatePayment(body);
+    const payment = await PaymentService.getPaymentTableRowByNumber(
+      result.payment_number,
+    );
+
+    if (!payment) {
+      throw new Error("Payment was updated but could not be loaded.");
+    }
+
+    return payment;
+  }, {
     body: "payment.update",
   });

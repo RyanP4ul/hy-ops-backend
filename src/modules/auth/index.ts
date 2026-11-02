@@ -1,4 +1,5 @@
 import Elysia from "elysia";
+import { currentSession } from "./policy";
 import bcrypt from "bcrypt";
 import {
   AccessTokenPayloadModel,
@@ -42,28 +43,18 @@ export const authRoutes = new Elysia({ prefix: "auth" })
 
     const user = await UserService.findUserById(payload.sub);
 
-    if (!user) {
+    if (!user || !currentSession(payload, user)) {
       set.status = 401;
       return {
         message: "Unauthorized",
       };
     }
 
-    if (user.token_version !== payload.token_version) {
-      logger.error(
-        `Token version mismatch for user ${user.id}. Token version: ${payload.token_version}, User token version: ${user.token_version}`,
-      );
-      set.status = 401;
-      return {
-        message: "Unauthorized",
-      };
-    }
-
-    return payload;
+    return { ...payload, id: user.id };
   })
   .post(
     "/refresh",
-    async ({ cookie: { access_token, refresh_token }, jwt, set }) => {
+    async ({ cookie: { access_token, refresh_token }, jwt, refreshToken, set }) => {
       if (!refresh_token.value || typeof refresh_token.value !== "string") {
         set.status = 401;
         return {
@@ -71,11 +62,11 @@ export const authRoutes = new Elysia({ prefix: "auth" })
         };
       }
 
-      const payload = (await jwt.verify(
+      const payload = (await refreshToken.verify(
         refresh_token.value as string,
       )) as unknown as RefreshTokenPayloadModel;
 
-      if (!payload) {
+      if (!payload || payload.token_type !== "refresh" || typeof payload.exp !== "number" || payload.exp <= Math.floor(Date.now() / 1000)) {
         set.status = 401;
         return {
           message: "Unauthorized",
@@ -84,7 +75,7 @@ export const authRoutes = new Elysia({ prefix: "auth" })
 
       const user = await UserService.findUserById(payload.sub);
 
-      if (!user || user.token_version !== payload.token_version) {
+      if (!user || user.token_version !== payload.token_version || user.refresh_token !== refresh_token.value) {
         set.status = 401;
         return {
           message: "Unauthorized",
@@ -103,14 +94,23 @@ export const authRoutes = new Elysia({ prefix: "auth" })
   )
   .post(
     "/login",
-    async ({ jwt, body, set, cookie: { access_token, refresh_token } }) => {
-      const { email, password } = body;
+    async ({ jwt, refreshToken: refreshSigner, body, set, cookie: { access_token, refresh_token } }) => {
+      const { email, password, is_mobile } = body;
       const errors: Record<string, string> = {};
       const user = await UserService.findUserByEmail(email);
 
       if (!user || !(await bcrypt.compare(password, user.password_hash))) {
         set.status = 400;
         errors["email"] = "Invalid credentials.";
+      }
+
+      if (is_mobile && user && Object.keys(errors).length === 0 && user.role !== "driver") {
+        errors["email"] = "Only driver accounts can sign in to HYOps Driver.";
+      }
+
+      if (!is_mobile && user?.role === "driver") {
+        set.status = 400;
+        errors["email"] = "Drivers can only log in via the mobile app.";
       }
 
       if (errors && Object.keys(errors).length > 0) {
@@ -123,6 +123,7 @@ export const authRoutes = new Elysia({ prefix: "auth" })
       const { accessToken, refreshToken } = await UserService.rotateSession(
         user?.id || -1,
         jwt,
+        refreshSigner,
       );
 
       access_token.set({
@@ -137,15 +138,21 @@ export const authRoutes = new Elysia({ prefix: "auth" })
 
       return {
         message: "Logged in",
-		access_token: accessToken,
-		refresh_token: refreshToken
+        access_token: accessToken,
+        refresh_token: refreshToken,
       };
     },
     {
       body: "login",
     },
   )
-  .post("/logout", async ({ cookie: { access_token, refresh_token }, set }) => {
+  .post("/logout", async ({ cookie: { access_token, refresh_token }, jwt, refreshToken, set }) => {
+    const access = typeof access_token.value === "string" ? await jwt.verify(access_token.value) : false;
+    const refresh = typeof refresh_token.value === "string" ? await refreshToken.verify(refresh_token.value) : false;
+    const claims = access || refresh;
+    if (claims && Number.isSafeInteger(Number(claims.sub)) && typeof claims.token_version === "number") {
+      await UserService.revokeSession(Number(claims.sub), claims.token_version);
+    }
     access_token.remove();
     refresh_token.remove();
 

@@ -1,5 +1,9 @@
 import Elysia, { Static, t } from "elysia";
 
+export const DeliveryIdParams = t.Object({ id: t.Numeric() });
+export const StopIdParams = t.Object({ stopId: t.Numeric() });
+export const OkResponse = t.Object({ ok: t.Literal(true) });
+
 export const deliveryCreate = t.Object({
   order_ids: t.Array(t.Numeric({ minimum: 1 })),
   scheduled_date: t.String(),
@@ -11,6 +15,9 @@ export const deliveryCreate = t.Object({
   ]),
   driver_id: t.Numeric({ minimum: 1 }),
   vehicle_id: t.Numeric({ minimum: 1 }),
+  delivery_allowance: t.Numeric({ minimum: 0 }),
+  fuel: t.Numeric({ minimum: 0 }),
+  toll: t.Numeric({ minimum: 0 }),
 });
 
 export const deliveryEvent = t.Object({
@@ -22,10 +29,18 @@ export const deliveryEvent = t.Object({
   delivery_version: t.Numeric({ minimum: 1 }),
 });
 
+export const deliveryAssignment = t.Object({
+  driver_id: t.Numeric({ minimum: 1 }),
+  vehicle_id: t.Numeric({ minimum: 1 }),
+  delivery_version: t.Numeric({ minimum: 1 }),
+});
+
 export const deliveryModel = new Elysia().model({
   "deliveries.create": deliveryCreate,
   "deliveries.event": deliveryEvent,
+  "deliveries.assignment": deliveryAssignment,
 });
 
 export type DeliveryCreateType = Static<typeof deliveryCreate>;
 export type DeliveryEventType = Static<typeof deliveryEvent>;
+export type DeliveryAssignmentType = Static<typeof deliveryAssignment>;

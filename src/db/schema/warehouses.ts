@@ -1,5 +1,11 @@
 import { relations } from "drizzle-orm";
-import { integer, pgTable, varchar, boolean } from "drizzle-orm/pg-core";
+import {
+  integer,
+  pgTable,
+  varchar,
+  boolean,
+  numeric,
+} from "drizzle-orm/pg-core";
 import { inventory } from "./inventory";
 
 export const warehouses = pgTable("warehouses", {
@@ -9,6 +15,8 @@ export const warehouses = pgTable("warehouses", {
   city: varchar().notNull(),
   state: varchar().notNull(),
   zip_code: varchar().notNull(),
+  latitude: numeric(),
+  longitude: numeric(),
   version: integer().notNull().default(1),
   is_archived: boolean().notNull().default(false),
   archived_at: integer(),

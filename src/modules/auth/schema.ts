@@ -8,6 +8,8 @@ export const AuthUser = t.Object({
   token_version: t.Number(),
   user_agent: t.Any(),
   iat: t.Number(),
+  exp: t.Number(),
+  token_type: t.String(),
 });
 
 export type AuthUser = Static<typeof AuthUser>;

@@ -53,11 +53,12 @@ export const payments = pgTable(
       precision: 12,
       scale: 2,
     }).notNull(),
+    refunded_amount: numeric("refunded_amount", { precision: 12, scale: 2 }).notNull().default("0"),
     reference_number: varchar("reference_number", {
       length: 100,
     }),
     version: integer("version").notNull().default(1),
-    received_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
+    received_at: timestamp({ withTimezone: true }),
     created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
     updated_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },

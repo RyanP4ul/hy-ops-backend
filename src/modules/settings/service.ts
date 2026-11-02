@@ -41,18 +41,25 @@ export abstract class SettingService {
         logger.silly(
           `Updating setting: ${setting.name} to value: ${setting.value}`,
         );
-        const updatedSetting = await tx
+        const [updatedSetting] = await tx
           .update(settings)
-          .set({ value: setting.value, version: setting.version })
+          .set({
+            value: setting.value,
+            version: setting.version + 1,
+            updated_at: Math.floor(Date.now() / 1000),
+          })
           .where(
             and(
               eq(settings.name, setting.name),
               eq(settings.version, setting.version),
             ),
-          );
+          )
+          .returning({ name: settings.name });
 
         if (!updatedSetting) {
-          throw new Error(`Setting with name ${setting.name} not found`);
+          throw new Error(
+            `Setting ${setting.name} was not found or has been modified. Please refresh and try again.`,
+          );
         }
       }
 

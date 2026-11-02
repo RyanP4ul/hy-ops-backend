@@ -12,9 +12,13 @@
     "db:seed": "bun run src/db/seeds",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
-    "lint:rules": "oxlint --rules"
+    "lint:rules": "oxlint --rules",
+    "test": "bun run tests/run-tests.ts",
+    "test:db": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-database.ps1"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1156.0",
+    "@aws-sdk/s3-request-presigner": "^3.1156.0",
     "@elysia/bearer": "^1.4.4",
     "@elysia/cors": "^1.4.2",
     "@elysia/jwt": "^1.4.2",
@@ -22,7 +26,11 @@
     "bcrypt": "^6.0.0",
     "drizzle-orm": "^0.45.2",
     "elysia": "latest",
+    "exceljs": "^4.4.0",
+    "googleapis": "^188.0.0",
     "pg": "^8.22.0",
+    "postgres": "^3.4.9",
+    "sharp": "^0.35.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {

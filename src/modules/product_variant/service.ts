@@ -1,26 +1,29 @@
 import { db } from "@/db/index";
 import { product_variants } from "@/db/schema/products";
-import { ilike } from "drizzle-orm";
+import { inventory } from "@/db/schema/inventory";
+import { and, asc, count, eq, ilike, notExists } from "drizzle-orm";
 
 export abstract class ProductVariantService {
   static async getProductVariants(
     page: number = 1,
     limit: number = 10,
     search: string = "",
+    excludeInventoryWarehouseId?: number,
   ) {
     const is_search_empty = search.length === 0;
-    const offset = is_search_empty ? Math.max(page * limit, 0) : 0;
+    const offset = Math.max(page * limit, 0);
 
-    const where = !is_search_empty
+    const where = and(!is_search_empty
       ? ilike(product_variants.sku, `%${search}%`)
-      : undefined;
+      : undefined,
+      excludeInventoryWarehouseId === undefined ? undefined : notExists(
+        db.select({ id: inventory.id }).from(inventory).where(and(
+          eq(inventory.warehouse_id, excludeInventoryWarehouseId),
+          eq(inventory.product_variant_id, product_variants.id),
+        )),
+      ));
 
-    const total_page = await db.query.product_variants.findMany({
-      columns: {
-        id: true,
-      },
-      where,
-    });
+    const [total] = await db.select({ value: count() }).from(product_variants).where(where);
 
     const product_variants_rows = await db.query.product_variants.findMany({
       columns: {
@@ -32,11 +35,12 @@ export abstract class ProductVariantService {
       where,
       limit,
       offset,
+      orderBy: asc(product_variants.id),
     });
 
     return {
       rows: product_variants_rows,
-      total: total_page.length,
+      total: total.value,
     };
   }
 }

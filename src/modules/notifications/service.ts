@@ -53,7 +53,7 @@ export abstract class NotificationService {
           ),
         );
 
-      if (updateResult.rowCount === 0) {
+      if (updateResult.count === 0) {
         throw new Error("No notifications found to mark as read.");
       }
 

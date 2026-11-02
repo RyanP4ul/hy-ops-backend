@@ -4,6 +4,7 @@ import { logger } from "../../utils/logger";
 
 const vehicle_data: VehicleInsert[] = [
   {
+    warehouse_id: 1,
     plate_number: "ABC-1234",
     status: "available",
     type: "truck",
@@ -12,6 +13,7 @@ const vehicle_data: VehicleInsert[] = [
     updated_at: Math.floor(Date.now() / 1000),
   },
   {
+    warehouse_id: 2,
     plate_number: "XYZ-5678",
     status: "maintenance",
     type: "van",
@@ -26,9 +28,11 @@ export async function vehicleSeeds() {
     await db.insert(vehicles).values(vehicle_data);
     logger.info("Vehicle seed completed successfully.");
   } catch (error) {
-    logger.error(
-      "Error seeding vehicles:",
-      error instanceof Error ? error.message : error,
-    );
+    if (error instanceof Error) {
+      logger.error(
+        "Error seeding vehicles:",
+        error instanceof Error ? error.message : error,
+      );
+    }
   }
 }

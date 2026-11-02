@@ -43,10 +43,7 @@ export abstract class RequestBase<TSchema extends z.ZodTypeAny = z.ZodAny> {
 
     if (!result.success) {
       const firstError = result.error.issues[0];
-      logger.error(
-        `Request parameters validation failed: ${firstError?.message || "Unknown error"}`,
-      );
-      return;
+      throw new Error(`Request parameters validation failed: ${firstError?.message || "Unknown error"}`);
     }
 
     // if (!result.success && character.properties.access >= 60) {

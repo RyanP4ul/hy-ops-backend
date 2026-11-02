@@ -1,9 +1,20 @@
 import { Elysia } from "elysia";
 import { AuthUser } from "../auth/schema";
+import { UserService } from "../user/service";
+import { UserMutationError } from "../user/mutation-policy";
 import { ArchiveService } from "./service";
 
 export const archivesRoutes = new Elysia({ prefix: "/archives" })
   .decorate("user", AuthUser)
+  .onError(({ error, set }) => {
+    if (error instanceof UserMutationError) { set.status = error.status; return { message: error.message }; }
+  })
+  .onBeforeHandle(async ({ user, set }) => {
+    const id = Number(user.sub);
+    const actor = Number.isSafeInteger(id) && id > 0 ? await UserService.getMutationActor(id) : undefined;
+    if (!actor || actor.token_version !== user.token_version) { set.status = 401; return { message: "Unauthorized" }; }
+    if (actor.role !== "admin") { set.status = 403; return { message: "Only administrators can access archives." }; }
+  })
   .get("/", async ({ set, query }) => {
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;
@@ -13,7 +24,7 @@ export const archivesRoutes = new Elysia({ prefix: "/archives" })
     set.headers["X-Total-Count"] = result.total;
     return result.rows;
   })
-  .put("/:id/restore", async ({ params }) => {
+  .put("/:id/restore", async ({ params, user }) => {
     const archiveId = parseInt(params.id);
-    return await ArchiveService.restoreArchive(archiveId);
+    return await ArchiveService.restoreArchive(archiveId, { id: Number(user.sub), tokenVersion: Number(user.token_version) });
   });
