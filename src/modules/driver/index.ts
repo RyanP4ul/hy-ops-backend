@@ -4,6 +4,7 @@ import { proofService } from "./proofs";
 import Elysia, { t } from "elysia";
 import { AuthUser } from "../auth/schema";
 import { DriverService } from "./service";
+import { settingService } from "../settings/service";
 
 const pagination = t.Object({ page: t.Optional(t.Numeric({ minimum: 0, maximum: 100000, multipleOf: 1 })), pageSize: t.Optional(t.Numeric({ minimum: 1, maximum: 50, multipleOf: 1 })), past: t.Optional(t.Union([t.Literal("true"), t.Literal("false")])) });
 const historyQuery = t.Object({ ...pagination.properties, from: t.Optional(t.String({ format: "date" })), to: t.Optional(t.String({ format: "date" })), status: t.Optional(t.Union([t.Literal("delivered"), t.Literal("failed"), t.Literal("cancelled")])) });
@@ -13,6 +14,10 @@ const command = { version: t.Integer({ minimum: 1 }), operationKey: t.String({ f
 export function createDriverRoutes(proofs = proofService) { return new Elysia({ prefix: "/driver" }).decorate("user", {} as AuthUser)
   .post("/returns/:id/collected", ({ user, params, body }) => CustomerReturnService.collect(Number(user.sub), params.id, body), { params, body: t.Object(command) })
   .get("/profile", ({ user }) => DriverService.profile(Number(user.sub)))
+  .get("/settings", async () => {
+    const [setting] = await settingService.getSettingByNames(["mobile_automatic_refresh_interval_ms"]);
+    return { mobile_automatic_refresh_interval_ms: setting?.value ?? null };
+  })
   .get("/trips", ({ user, query }) => DriverService.trips(Number(user.sub), query.page, query.pageSize, query.past === "true"), { query: pagination })
   .get("/trips/:id", ({ user, params }) => DriverService.trip(Number(user.sub), params.id), { params })
   .post("/trips/:id/start", ({ user, params, body }) => DeliveryService.dispatchDelivery(params.id, undefined, { driverId: Number(user.sub), version: body.version }), { params, body: t.Object({ version: t.Integer({ minimum: 1 }) }) })

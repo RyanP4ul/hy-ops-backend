@@ -36,6 +36,97 @@ describe.skipIf(!testUrl)("customer return retrieval", () => {
   async function balances() {
     return { inventory: await sql`select quantity,reserved from inventory order by id`, payments: await sql`select * from payments order by id`, refunds: await sql`select * from payment_refunds order by id` };
   }
+  test("GPS reads the configured return distance on every update and validates settings", async () => {
+    const { recordPosition } = require("../src/modules/fleet-map/fleet.service");
+    const { SettingService } = require("../src/modules/settings/service");
+    const name = "returning_automatic_confirm_ms_interval";
+    expect((await SettingService.getAllSettings())[name]).toMatchObject({ value: "100", version: 1 });
+    for (const value of ["0", "30000", "100.5", "invalid"]) {
+      await rejects(SettingService.updateSetting([{ name, value, version: 1 }]), "50 to 1000 metres");
+    }
+    const original = await delivered();
+    await recordPosition(1, { latitude: 14.5013, longitude: 121, accuracyM: 5 });
+    expect((await sql`select status from deliveries where id=${original.run}`)[0].status).toBe("returning");
+    await SettingService.updateSetting([{ name, value: "200", version: 1 }]);
+    expect((await SettingService.getAllSettings())[name]).toMatchObject({ value: "200", version: 2 });
+    await rejects(SettingService.updateSetting([{ name, value: "150", version: 1 }]), "modified");
+    // A corrupt legacy value must not silently expand the radius or complete the run.
+    await sql`update settings set value='30000' where name=${name}`;
+    await recordPosition(1, { latitude: 14.5013, longitude: 121, accuracyM: 5, recordedAt: new Date(Date.now() + 10).toISOString() });
+    expect((await sql`select status from deliveries where id=${original.run}`)[0].status).toBe("returning");
+    await SettingService.updateSetting([{ name, value: "200", version: 2 }]);
+    await recordPosition(1, { latitude: 14.5013, longitude: 121, accuracyM: 5, recordedAt: new Date(Date.now() + 20).toISOString() });
+    expect((await sql`select status from deliveries where id=${original.run}`)[0].status).toBe("completed");
+  });
+  test("GPS and mobile web settings save together without reseeding and reject invalid intervals", async () => {
+    const { SettingService } = require("../src/modules/settings/service");
+    const mobile = "mobile_automatic_refresh_interval_ms";
+    const arrival = "returning_automatic_confirm_ms_interval";
+    expect((await SettingService.getAllSettings())[mobile]).toMatchObject({ value: "30000", version: 1 });
+    for (const value of ["0", "-1", "1.5", "NaN", "2147483648"]) {
+      await rejects(SettingService.updateSetting([
+        { name: arrival, value: "150", version: 1 },
+        { name: mobile, value, version: 1 },
+      ]), "milliseconds");
+    }
+    expect(await sql`select * from settings where name in (${mobile}, ${arrival})`).toHaveLength(0);
+    await SettingService.updateSetting([
+      { name: arrival, value: "150", version: 1 },
+      { name: mobile, value: "15000", version: 1 },
+    ]);
+    const all = await SettingService.getAllSettings();
+    expect(all[mobile]).toMatchObject({ value: "15000", version: 2 });
+    expect(all[arrival]).toMatchObject({ value: "150", version: 2 });
+    expect((await SettingService.getSettingByNames([mobile]))[0].value).toBe("15000");
+    await rejects(SettingService.updateSetting([{ name: mobile, value: "60000", version: 1 }]), "modified");
+    expect((await SettingService.getAllSettings())[mobile].value).toBe("15000");
+  });
+  test("GPS auto-confirms only a returning run at its assigned warehouse", async () => {
+    const { recordPosition } = require("../src/modules/fleet-map/fleet.service");
+    const original = await delivered();
+    const before = await balances();
+    // Other warehouse, missing accuracy, and stale fixes must not complete the run.
+    await recordPosition(1, { latitude: 14.5, longitude: 121, accuracyM: 5, recordedAt: new Date(Date.now() - 120_000).toISOString() });
+    await recordPosition(1, { latitude: 14.6, longitude: 121.1, accuracyM: 5 });
+    await recordPosition(1, { latitude: 14.5, longitude: 121, recordedAt: new Date(Date.now() + 1).toISOString() });
+    expect((await sql`select status from deliveries where id=${original.run}`)[0].status).toBe("returning");
+    const recordedAt = new Date(Date.now() + 10).toISOString();
+    await Promise.all([
+      recordPosition(1, { latitude: 14.5, longitude: 121, accuracyM: 5, recordedAt }),
+      recordPosition(1, { latitude: 14.5, longitude: 121, accuracyM: 5, recordedAt }),
+    ]);
+    expect((await sql`select status from deliveries where id=${original.run}`)[0].status).toBe("completed");
+    expect((await sql`select status from vehicles where id=1`)[0].status).toBe("available");
+    expect((await sql`select status from drivers where user_id=3`)[0].status).toBe("available");
+    expect(await balances()).toEqual(before);
+  });
+  test("GPS does not complete pending pickups; collected returns are received without restocking", async () => {
+    const { recordPosition } = require("../src/modules/fleet-map/fleet.service");
+    const original = await delivered();
+    const task = await returns.request(staff, original.stop, { reason: "Return", operationKey: crypto.randomUUID() });
+    await returns.assign(staff, task.id, { version: 1, vehicleId: 1, driverId: 3, operationKey: crypto.randomUUID() });
+    await recordPosition(1, { latitude: 14.5, longitude: 121, accuracyM: 5 });
+    expect((await sql`select status from deliveries where id=${original.run}`)[0].status).toBe("in_transit");
+    await returns.collect(3, task.id, { version: 2, operationKey: crypto.randomUUID() });
+    const before = await balances();
+    await recordPosition(1, { latitude: 14.5, longitude: 121, accuracyM: 5, recordedAt: new Date(Date.now() + 10).toISOString() });
+    expect((await sql`select status,received_by from customer_returns where id=${task.id}`)[0]).toEqual({ status: "received", received_by: null });
+    expect((await sql`select status from deliveries where id=${original.run}`)[0].status).toBe("completed");
+    expect(await balances()).toEqual(before);
+  });
+  test("GPS arrival leaves failed goods for manual warehouse inspection", async () => {
+    const { recordPosition } = require("../src/modules/fleet-map/fleet.service");
+    const run = await delivery.createDelivery({ order_ids: [1], driver_id: 3, vehicle_id: 1, scheduled_date: "2099-01-01", scheduled_time: "10:00", delivery_type: "INTERNAL", delivery_allowance: 0, fuel: 0, toll: 0 }, 1);
+    await delivery.dispatchDelivery(run.id, 1);
+    const [stop] = await sql`select id from deliveries_stops where delivery_id=${run.id}`;
+    await driver.outcome(3, stop.id, { version: 2, operationKey: crypto.randomUUID(), reason: "Closed" }, "failed");
+    const before = await balances();
+    await recordPosition(1, { latitude: 14.5, longitude: 121, accuracyM: 5, recordedAt: new Date(Date.now() + 10).toISOString() });
+    expect((await sql`select status from deliveries where id=${run.id}`)[0].status).toBe("returning");
+    expect(await balances()).toEqual(before);
+    await delivery.completeDelivery(run.id, 1, 2);
+    expect((await sql`select status from deliveries where id=${run.id}`)[0].status).toBe("completed");
+  });
   test("pickup-only lifecycle is scoped, idempotent and leaves money and stock untouched", async () => {
     const original = await delivered();
     await delivery.completeDelivery(original.run, 1, 2);

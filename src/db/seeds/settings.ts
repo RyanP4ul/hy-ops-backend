@@ -4,6 +4,12 @@ import { SettingInsert, settings } from "../schema/settings";
 
 const setting_lists: SettingInsert[] = [
   {
+    name: "returning_automatic_confirm_ms_interval",
+    value: "100", // Metres; the setting key is retained for compatibility.
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  },
+  {
     name: "low_stock_threshold",
     value: "10",
     created_at: Math.floor(Date.now() / 1000),
@@ -44,7 +50,13 @@ const setting_lists: SettingInsert[] = [
     value: "5",
     created_at: Math.floor(Date.now() / 1000),
     updated_at: Math.floor(Date.now() / 1000),
-  },
+  },  
+  {
+    name: "mobile_automatic_refresh_interval_ms",
+    value: "30000",
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  }
 ];
 
 export async function settingSeeds() {

@@ -4,6 +4,9 @@ import { assertDriverOwnership, assertOutcomeCommand } from "../src/modules/driv
 
 test("driver routes are narrow; staff can schedule without gaining administrative access", () => {
   expect(mayAccess("driver", "GET", "/driver/profile")).toBe(true);
+  expect(mayAccess("driver", "GET", "/driver/settings")).toBe(true);
+  expect(mayAccess("driver", "POST", "/driver/settings")).toBe(false);
+  expect(mayAccess("driver", "GET", "/settings")).toBe(false);
   expect(mayAccess("driver", "GET", "/driver/trips/123")).toBe(true);
   expect(mayAccess("driver", "POST", "/driver/stops/1/failed")).toBe(true);
   for (const path of ["/deliveries", "/orders", "/payments", "/driver/trips/1/dispatch"]) expect(mayAccess("driver", "POST", path)).toBe(false);

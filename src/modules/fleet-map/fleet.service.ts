@@ -1,4 +1,5 @@
 import { CustomerReturnService } from "../deliveries/customer-returns";
+import { DeliveryService } from "../deliveries/service";
 import type { AssignmentActor } from "../deliveries/scope";
 import { WorkflowError } from "../../utils/workflow-error";
 import { and, eq, sql, inArray } from "drizzle-orm";
@@ -119,5 +120,10 @@ export async function recordPosition(
     recordedAt, accuracyM: body.accuracyM ?? null,
   });
 
+  if (accepted) {
+    const returning = await db.select({ id: deliveries.id }).from(deliveries)
+      .where(and(eq(deliveries.vehicle_id, vehicleId), eq(deliveries.status, "returning")));
+    for (const run of returning) await DeliveryService.completeDelivery(run.id, undefined, undefined, true);
+  }
   return { ok: true as const, accepted };
 }

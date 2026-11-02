@@ -1,4 +1,7 @@
 import { CustomerReturnService } from "./customer-returns";
+import { isWarehouseArrival, parseWarehouseArrivalRadius, WAREHOUSE_ARRIVAL_RADIUS_M, WAREHOUSE_ARRIVAL_SETTING } from "./warehouse-arrival";
+import { settings } from "../../db/schema/settings";
+import { vehicle_positions } from "../../db/schema/vehicle-position";
 import { queueDeliveryNotifications, queueDeliveryEventNotifications } from "./notification-queue";
 import { customer_returns } from "../../db/schema/customer-returns";
 import { driver_stop_outcomes } from "../../db/schema/driver-outcomes";
@@ -789,6 +792,7 @@ export abstract class DeliveryService {
     deliveryId: number,
     warehouseId?: number,
     actorId?: number,
+    automatic = false,
   ) {
     await stockTransaction(async (tx) => {
       const [delivery] = await tx
@@ -799,6 +803,20 @@ export abstract class DeliveryService {
       if (!delivery) throw new WorkflowError("Delivery not found");
       await assertDeliveryScope(tx, deliveryId, warehouseId);
       if (delivery.status === "completed") return; // idempotent
+      if (automatic) {
+        if (delivery.status !== "returning") return;
+        const [home] = await tx.select({ latitude: warehouses.latitude, longitude: warehouses.longitude })
+          .from(vehicles).innerJoin(warehouses, eq(warehouses.id, vehicles.warehouse_id))
+          .where(and(eq(vehicles.id, delivery.vehicle_id), eq(warehouses.is_archived, false)));
+        const [fix] = await tx.select().from(vehicle_positions).where(eq(vehicle_positions.vehicle_id, delivery.vehicle_id));
+        const [arrivalSetting] = await tx.select({ value: settings.value }).from(settings).where(eq(settings.name, WAREHOUSE_ARRIVAL_SETTING));
+        const radiusM = arrivalSetting ? parseWarehouseArrivalRadius(arrivalSetting.value) : WAREHOUSE_ARRIVAL_RADIUS_M;
+        if (!home || !fix || radiusM === null || !isWarehouseArrival(fix, home, delivery.updated_at, Date.now(), radiusM)) return;
+        // GPS establishes arrival, but cannot certify failed goods are fit for resale.
+        const [unresolved] = await tx.select({ id: deliveries_stops.id }).from(deliveries_stops)
+          .where(and(eq(deliveries_stops.delivery_id, deliveryId), inArray(deliveries_stops.status, ["pending", "failed"]))).limit(1);
+        if (unresolved) return;
+      }
       if (delivery.status !== "returning") {
         throw new WorkflowError("Delivery is not returning to the warehouse");
       }
@@ -812,6 +830,7 @@ export abstract class DeliveryService {
             eq(customer_returns.status, "assigned"),
           ),
         );
+      if (automatic && pendingPickups.total > 0) return;
       if (pendingPickups.total > 0)
         throw new WorkflowError(
           "Collect assigned customer returns before confirming warehouse receipt.",
@@ -917,6 +936,10 @@ export abstract class DeliveryService {
         .update(drivers)
         .set({ status: "available" })
         .where(eq(drivers.user_id, delivery.driver_id));
+      if (automatic) {
+        // PostgreSQL delivers this only after commit, including to other API instances.
+        await tx.execute(sql`select pg_notify('hyops_resource_changed', ${JSON.stringify({ type: "RESOURCE_CHANGED", payload: { resource: "deliveries", eventId: crypto.randomUUID() } })})`);
+      }
     });
 
     return { ok: true as const };
