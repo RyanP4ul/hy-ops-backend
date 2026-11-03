@@ -102,6 +102,7 @@ export async function listPayments(orderIds: number[]) {
     .select({
       orderId: payments.order_id,
       method: payments.payment_method,
+      type: payments.payment_type,
       status: payments.payment_status,
       amount: payments.amount,
     })

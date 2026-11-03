@@ -113,6 +113,7 @@ function buildOrder(
     },
     paymentArrangement,
     paymentMethod: orderPayments[0]?.method ?? null,
+    paymentType: orderPayments[0]?.type ?? null,
     totalAmount,
     amountPaid,
     dueDate:

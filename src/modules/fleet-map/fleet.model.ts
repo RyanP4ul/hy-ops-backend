@@ -32,6 +32,7 @@ export const OrderDto = t.Object({
   paymentArrangement: PaymentArrangementSchema,
   /** Method of the most recent payment, or null if nothing has been paid yet. */
   paymentMethod: t.Union([PaymentMethodSchema, t.Null()]),
+  paymentType: t.Optional(t.Union([t.String(), t.Null()])),
   totalAmount: t.Union([t.Number(), t.Null()]),
   amountPaid: t.Number(),
   /** ISO date (YYYY-MM-DD); only set for NET_30 orders. */

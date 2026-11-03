@@ -26,6 +26,7 @@ export abstract class InvoiceService {
         company_name: customers.company_name,
         phone_number: customers.phone_number,
         payment_method: invoice_payments.payment_method,
+        payment_type: sql<string | null>`(select ${payments.payment_type} from ${payments} where ${payments.order_id} = ${invoices.order_id} order by ${payments.id} limit 1)`,
         full_address: orders.shipping_address,
       })
       .from(invoices)
@@ -100,6 +101,7 @@ export abstract class InvoiceService {
       due_date: dueDate.toISOString().slice(0, 10),
       payment_arrangement: invoice.payment_arrangement,
       payment_method: invoice.payment_method,
+      payment_type: invoice.payment_type,
       payment_status: paymentStatus,
       amount_paid: amountPaid,
       customer: {

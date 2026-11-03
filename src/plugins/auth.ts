@@ -31,10 +31,22 @@ export const configCookie = {
   REFRESH_TOKEN_EXPIRATION: 7 * 24 * 60 * 60, // 7 days
 };
 
+/*
 export const cookieOptions = (maxAge: number) => ({
   httpOnly: true,
   path: "/",
   sameSite: "lax" as const,
+  secure: process.env.NODE_ENV === "production",
+  maxAge,
+});
+*/
+
+export const cookieOptions = (maxAge: number) => ({
+  httpOnly: true,
+  path: "/",
+  sameSite: process.env.NODE_ENV === "production"
+    ? "none" as const
+    : "lax" as const,
   secure: process.env.NODE_ENV === "production",
   maxAge,
 });

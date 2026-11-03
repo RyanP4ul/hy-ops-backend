@@ -122,6 +122,7 @@ export abstract class PaymentService {
         customer_id: payments.customer_id,
         customer_name: users.name,
         payment_method: payments.payment_method,
+        payment_type: payments.payment_type,
         payment_status: payments.payment_status,
         amount: payments.amount,
         refunded_amount: payments.refunded_amount,

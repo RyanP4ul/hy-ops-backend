@@ -46,6 +46,7 @@ export const payments = pgTable(
         onUpdate: "cascade",
       }),
     payment_method: payment_method("payment_method").notNull(),
+    payment_type: varchar("payment_type", { length: 100 }),
     payment_status: payment_status("payment_status")
       .notNull()
       .default("UNPAID"),
