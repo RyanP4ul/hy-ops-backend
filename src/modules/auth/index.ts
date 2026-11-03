@@ -1,5 +1,6 @@
 import Elysia from "elysia";
 import { currentSession } from "./policy";
+import { issueWsTicket } from "./ws-ticket";
 import bcrypt from "bcrypt";
 import {
   AccessTokenPayloadModel,
@@ -22,6 +23,21 @@ export const authRoutes = new Elysia({ prefix: "auth" })
     ...LoginModel,
   })
   .use(authPlugin)
+  .post("/ws-ticket", async ({ cookie: { access_token }, jwt, set }) => {
+    set.headers["Cache-Control"] = "no-store";
+    const claims = typeof access_token.value === "string"
+      ? await jwt.verify(access_token.value)
+      : false;
+    const id = claims ? Number(claims.sub) : NaN;
+    const actor = Number.isSafeInteger(id) && id > 0
+      ? await UserService.getMutationActor(id)
+      : null;
+    if (!claims || !currentSession(claims, actor)) {
+      set.status = 401;
+      return { message: "Unauthorized" };
+    }
+    return { ticket: await issueWsTicket(claims) };
+  })
   .get("/me", async ({ cookie: { access_token }, jwt, set }) => {
     if (!access_token.value || typeof access_token.value !== "string") {
       set.status = 401;

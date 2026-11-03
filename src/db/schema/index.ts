@@ -15,6 +15,7 @@ export * from "./users";
 export * from "./vehicles";
 export * from "./warehouses";
 export * from "./ws";
+export * from "./ws-ticket";
 
 export * from "./invoice";
 export * from "./stock-movement";

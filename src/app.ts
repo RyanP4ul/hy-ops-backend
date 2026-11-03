@@ -1,7 +1,8 @@
 import type { SmsGateway } from "./modules/sms/service";
 import { startDeliveryNotificationWorker } from "./modules/deliveries/notification-worker";
 import { startDriverEvents } from "./modules/driver/assignment-events";
-import { authorizeSession, allowedOrigin } from "./modules/auth/policy";
+import { authorizeClaims, allowedOrigin } from "./modules/auth/policy";
+import { consumeWsTicket } from "./modules/auth/ws-ticket";
 import type { ProofService } from "./modules/driver/proofs";
 import { createDriverRoutes, driverRoutes } from "./modules/driver";
 import { WorkflowError } from "./utils/workflow-error";
@@ -52,6 +53,9 @@ export function createApp(
   options: { automation?: boolean; externalIntegrations?: boolean; proofs?: ProofService; sms?: SmsGateway; emailSender?: EmailSender } = {},
 ) {
   let events: Awaited<ReturnType<typeof startResourceEvents>> | undefined;
+  // Share the validated identity with the resolver without verifying a missing
+  // cookie again or consuming a WebSocket ticket a second time.
+  const authenticatedClaims = new WeakMap<Request, Record<string, any>>();
   let driverEvents: Awaited<ReturnType<typeof startDriverEvents>> | undefined;
   let deliveryNotifications: ReturnType<typeof startDeliveryNotificationWorker> | undefined;
   return (
@@ -148,7 +152,6 @@ export function createApp(
           };
         }
       })
-
        .onAfterResponse(({ request, set }) => {
          console.log(
            `[${request.method}] ${new URL(request.url).pathname}`,
@@ -163,9 +166,16 @@ export function createApp(
             jwt,
             set,
           }) => {
-            const status = await authorizeSession(
-              access_token.value,
-              (token) => jwt.verify(token),
+            const url = new URL(request.url);
+            const ticket = url.pathname === "/ws" ? url.searchParams.get("ticket") : null;
+            // Cookie upgrades remain supported for native/mobile clients.
+            const claims = ticket !== null
+              ? await consumeWsTicket(ticket)
+              : typeof access_token.value === "string"
+                ? await jwt.verify(access_token.value)
+                : false;
+            const status = await authorizeClaims(
+              claims,
               UserService.getMutationActor,
               request.method,
               new URL(request.url).pathname,
@@ -180,13 +190,15 @@ export function createApp(
                     : "You do not have permission to perform this action.",
               };
             }
+            if (claims) authenticatedClaims.set(request, claims);
           },
         },
         (app) =>
           app
             .resolve(
-              async ({ server, request, cookie: { access_token }, jwt }) => {
-                const payload = await jwt.verify(access_token.value as string);
+              async ({ server, request }) => {
+                const payload = authenticatedClaims.get(request);
+                authenticatedClaims.delete(request);
 
                 if (!payload) {
 				  console.log("Unauthorized");

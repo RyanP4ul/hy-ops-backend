@@ -55,7 +55,7 @@ ALTER TABLE orders ADD CONSTRAINT orders_warehouse_id_users_id_fk FOREIGN KEY (w
   & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f $legacyPath
   if ($LASTEXITCODE -ne 0) { throw 'Legacy fixture column setup failed.' }
   foreach ($migration in @('0000_nullable_payment_received_at.sql', '0001_order_item_price_snapshots.sql', '0002_order_stock_reservations.sql', '0003_destinations_stock_history_refunds.sql', '0004_gps_and_receipt_events.sql', '0006_driver_stop_outcomes.sql', '0007_driver_history_proofs.sql', '0008_customer_return_pickups.sql')) {
-    & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Join-Path $backendRoot "src/db/migrations/$migration")
+    & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Join-Path $backendRoot "src/db/_migrations/$migration")
     if ($LASTEXITCODE -ne 0) { throw "Fixture migration failed: $migration" }
   }
   $env:HYOPS_TEST_DATABASE_URL = "postgres://hyops_test@127.0.0.1:$fixturePort/hyops_test"

@@ -11,6 +11,11 @@ export async function authorizeSession(token: unknown, verify: (token: string) =
   if (typeof token !== "string" || !token) return 401;
   const claims = await verify(token);
   if (!claims) return 401;
+  return authorizeClaims(claims, lookup, method, path);
+}
+
+export async function authorizeClaims(claims: SessionClaims | null | false, lookup: (id: number) => Promise<SessionActor | null | undefined>, method: string, path: string): Promise<200 | 401 | 403> {
+  if (!claims) return 401;
   const id = Number(claims.sub);
   const actor = Number.isSafeInteger(id) && id > 0 ? await lookup(id) : undefined;
   if (!actor || !currentSession(claims, actor)) return 401;
@@ -19,7 +24,7 @@ export async function authorizeSession(token: unknown, verify: (token: string) =
 
 export function allowedOrigin(origin: string | null, requestUrl: string): boolean {
   if (!origin) return true; // Native/mobile clients do not send browser Origin.
-  const configured = (process.env.APP_ORIGINS ?? "http://localhost:3000,http://127.0.0.1:3000").split(",").map((value) => value.trim());
+  const configured = (process.env.APP_ORIGINS?.trim() || process.env.FRONTEND_URL?.trim() || "http://localhost:3000,http://127.0.0.1:3000").split(",").map((value) => value.trim());
   return origin === new URL(requestUrl).origin || configured.includes(origin);
 }
 

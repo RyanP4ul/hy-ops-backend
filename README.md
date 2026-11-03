@@ -68,12 +68,49 @@ The API listens on `http://localhost:5173`.
 ## Authentication
 
 `POST /auth/login` sets the `access_token` and `refresh_token` HTTP-only
-cookies. All module routes and the websocket endpoint require a valid access
-token. `POST /auth/refresh` issues a new access token, and
+cookies. All module routes require a valid access token. WebSocket upgrades
+accept either an access-token cookie (native clients) or a single-use browser
+ticket. `POST /auth/refresh` issues a new access token, and
 `POST /auth/logout` clears both cookies.
 
 The frontend accesses these endpoints through its `/api/*` rewrite, for
 example `/api/auth/login`.
+
+### WebSockets on Vercel and Render
+
+The browser logs in through Vercel's `/api/*` rewrite, so its HTTP-only cookies
+belong to the frontend host. They are not sent to the separate Render host.
+Before every connection or reconnect, the frontend posts to
+`/api/auth/ws-ticket` with its cookies. The authenticated backend issues a
+random ticket valid for 30 seconds and the browser connects directly to
+`wss://<backend>/ws?ticket=...`. PostgreSQL stores only the ticket hash and
+the validated session claims; atomic redemption prevents reuse across instances.
+The socket retains the original access-token expiry and session revocation checks.
+
+Deploy in this order:
+
+1. Apply `src/db/migrations/0003_ws_tickets.sql` to the backend database through
+   your normal migration process (`bun run db:migrate` for a database already
+   tracked by this migration history).
+2. Set Render's `NODE_ENV=production` and
+   `APP_ORIGINS=https://hy-ops-frontend.vercel.app`. Origins are comma-separated
+   exact origins without trailing slashes. If `APP_ORIGINS` is empty,
+   `FRONTEND_URL` is used before the local development defaults.
+3. Deploy the backend, then rebuild and deploy the frontend with
+   `NEXT_PUBLIC_BACKEND_URL=https://hy-ops-backend.onrender.com` and
+   `NEXT_PUBLIC_WS_URL=wss://hy-ops-backend.onrender.com/ws`.
+4. Sign in and verify `/api/auth/ws-ticket` returns 200, the WebSocket upgrade
+   returns 101, and the socket receives `WS_READY`.
+
+Do not log ticket query parameters in reverse-proxy or access logs. The backend
+request logger records the pathname only. A missing cookie on a ticket-authenticated
+WebSocket request is expected.
+
+Run the database/socket regression checks with
+`powershell -File scripts/test-database.ps1 -Suite Driver`. Run the browser
+ticket and reconnect checks with
+`powershell -File scripts/test-database.ps1 -Suite Live -BrowserFilter 'WebSocket tickets'`.
+Both commands create disposable loopback databases.
 
 ## HTTP routes
 
@@ -84,6 +121,7 @@ access-token guard.
 | --- | --- | --- |
 | `GET` | `/auth/me` | Return the current user |
 | `POST` | `/auth/login` | Sign in |
+| `POST` | `/auth/ws-ticket` | Issue a single-use ticket for an authenticated session |
 | `POST` | `/auth/refresh` | Refresh the access token |
 | `POST` | `/auth/logout` | Sign out |
 | `GET` | `/products`, `/products/:id` | List and read products |

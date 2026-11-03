@@ -42,7 +42,7 @@ try {
     if (!ready) throw new Error(`Fixture ${port} did not start.`);
   }
   const frontend = resolve(process.cwd(), "../frontend");
-  const frontendEnv = { ...process.env, API_URL: "http://127.0.0.1:5180", NEXT_PUBLIC_API_URL: "http://127.0.0.1:5180", NEXT_PUBLIC_WS_URL: "ws://127.0.0.1:5180/ws", NEXT_PUBLIC_DEBUG: "false", HYOPS_LIVE_SERVER_STARTED: "1" };
+  const frontendEnv = { ...process.env, API_URL: "http://127.0.0.1:5180", NEXT_PUBLIC_BACKEND_URL: "http://127.0.0.1:5180", NEXT_PUBLIC_API_URL: "http://127.0.0.1:5180", NEXT_PUBLIC_WS_URL: "ws://127.0.0.1:5180/ws", NEXT_PUBLIC_DEBUG: "false", HYOPS_LIVE_SERVER_STARTED: "1" };
   // Own the server process tree so Windows teardown cannot strand Next workers.
   try { await fetch("http://127.0.0.1:3100", { signal: AbortSignal.timeout(500) }); throw new Error("Fixture port 3100 is already in use."); }
   catch (error) { if (error instanceof Error && error.message.includes("already in use")) throw error; }

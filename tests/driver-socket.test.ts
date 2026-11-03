@@ -37,11 +37,12 @@ describe.skipIf(!url)("driver WebSocket integration", () => {
     const data = await response.json();
     return `access_token=${data.access_token}; refresh_token=${data.refresh_token}`;
   }
-  async function connect(cookie: string) {
+  async function connect(cookie: string, ticket?: string) {
     const server = app.server;
     if (!server) throw new Error("Socket fixture is not listening.");
     const NativeSocket = WebSocket as unknown as new (url: string, options: Bun.WebSocketOptions) => WebSocket;
-    const socket = new NativeSocket(`ws://127.0.0.1:${server.port}/ws`, { headers: { Cookie: cookie } });
+    const suffix = ticket ? `?ticket=${encodeURIComponent(ticket)}` : "";
+    const socket = new NativeSocket(`ws://127.0.0.1:${server.port}/ws${suffix}`, { headers: { ...(cookie ? { Cookie: cookie } : {}), Origin: "http://127.0.0.1:3100" } });
     sockets.push(socket);
     const messages: any[] = [];
     socket.addEventListener("message", event => messages.push(JSON.parse(String(event.data))));
@@ -53,6 +54,40 @@ describe.skipIf(!url)("driver WebSocket integration", () => {
     while (!predicate() && Date.now() < deadline) await Bun.sleep(20);
     expect(predicate()).toBe(true);
   }
+  async function ticketResponse(cookie?: string, origin = "http://127.0.0.1:3100") {
+    return app.handle(new Request("http://localhost/auth/ws-ticket", {
+      method: "POST", headers: { ...(cookie ? { Cookie: cookie } : {}), Origin: origin },
+    }));
+  }
+  test("browser ticket upgrades without cookies; tickets are hashed, single use and expire", async () => {
+    expect((await ticketResponse()).status).toBe(401);
+    const cookie = await login("staff@example.test", false);
+    expect((await ticketResponse(cookie, "https://untrusted.example")).status).toBe(403);
+    const response = await ticketResponse(cookie);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const { ticket } = await response.json();
+    const [stored] = await database`select ticket_hash, claims from ws_tickets`;
+    expect(stored.ticket_hash).not.toBe(ticket);
+    expect(stored.claims.role).toBe("staff");
+    const browser = await connect("", ticket);
+    expect(browser.messages.some(m => m.type === "WS_READY")).toBe(true);
+    const probe = (value: string, origin = "http://127.0.0.1:3100") => app.handle(new Request(`http://localhost/ws?ticket=${value}`, { headers: { Origin: origin, Upgrade: "websocket" } }));
+    expect((await probe(ticket)).status).toBe(401);
+    expect((await probe("invalid")).status).toBe(401);
+    const expired = await (await ticketResponse(cookie)).json();
+    await database`update ws_tickets set expires_at=now()-interval '1 second'`;
+    expect((await probe(expired.ticket)).status).toBe(401);
+    const concurrent = await (await ticketResponse(cookie)).json();
+    const { consumeWsTicket } = require("../src/modules/auth/ws-ticket");
+    const redeemed = await Promise.all([consumeWsTicket(concurrent.ticket), consumeWsTicket(concurrent.ticket)]);
+    expect(redeemed.filter(Boolean)).toHaveLength(1);
+    const revoked = await (await ticketResponse(cookie)).json();
+    await database`update users set token_version=token_version+1 where id=2`;
+    expect((await probe(revoked.ticket)).status).toBe(401);
+    expect((await ticketResponse(cookie)).status).toBe(401);
+    expect((await app.handle(new Request("http://localhost/ws", { headers: { Upgrade: "websocket" } }))).status).toBe(401);
+  });
   test("native cookie upgrade ingests real assigned GPS, rejects another driver, and invalidates website views", async () => {
     const driver = await connect(await login("driver1@example.test", true));
     const staff = await connect(await login("staff@example.test", false));
