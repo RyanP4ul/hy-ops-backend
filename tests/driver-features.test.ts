@@ -79,6 +79,20 @@ describe.skipIf(!url)("driver history and private proof integration", () => {
     expect((await sql`select quantity from inventory where id=1`)[0].quantity).toBe(stock.quantity);
     expect((await start(other)).status).toBe(404);
   });
+  test("delivery confirmation requires a successfully uploaded POD", async () => {
+    const { stopId } = await run();
+    const service = require("../src/modules/driver/service").DriverService;
+    const command = { version: 2, operationKey: crypto.randomUUID() };
+    const confirm = () => service.outcome(3, stopId, command, "delivered");
+    await expect(confirm()).rejects.toThrow("Submit Proof of Delivery");
+    expect(await sql`select * from driver_stop_outcomes`).toHaveLength(0);
+    const image = await require("sharp")({ create: { width: 64, height: 32, channels: 3, background: "white" } }).png().toBuffer();
+    const file = new File([image], "pod.png", { type: "image/png" });
+    await proofs.upload(3, stopId, file, "signature", crypto.randomUUID());
+    expect(await confirm()).toMatchObject({ ok: true });
+    expect(await confirm()).toMatchObject({ ok: true });
+    expect(await sql`select * from driver_stop_outcomes`).toHaveLength(1);
+  });
   test("photo/signature upload is private, idempotent, validated, bounded, and downloadable only by authorized actors", async () => {
     const { stopId } = await run(); const cookie = await auth();
     const sharp = require("sharp");

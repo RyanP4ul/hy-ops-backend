@@ -25,7 +25,7 @@ import {
 } from "./modal";
 import { OrderService } from "../order/service";
 import { orders } from "@/db/schema/order";
-import { count, eq, ilike, and, sql, inArray } from "drizzle-orm";
+import { count, eq, ilike, and, sql, inArray, or, asc } from "drizzle-orm";
 import {
   customer_addresses,
   customers,
@@ -130,6 +130,9 @@ export abstract class DeliveryService {
           return_status: customer_returns.status,
           order_id: orders.id,
           order_number: orders.order_number,
+          order_group_id: orders.order_group_id,
+          order_group_position: orders.order_group_position,
+          order_group_number: sql<string | null>`(select group_number from order_groups where id = ${orders.order_group_id})`,
           status: deliveries_stops.status,
           failure_reason: driver_stop_outcomes.reason,
           shipping_address: orders.shipping_address,
@@ -186,18 +189,23 @@ export abstract class DeliveryService {
           new Set(data.order_ids).size !== data.order_ids.length
         )
           throw new WorkflowError("Select distinct orders for delivery.");
+        // Lock the complete membership in ID order so partial and concurrent requests
+        // cannot schedule a group using a stale readiness snapshot.
+        const selectedGroupIds = tx.select({ id: orders.order_group_id }).from(orders).where(inArray(orders.id, data.order_ids));
+        const locked = await tx.select().from(orders).where(or(inArray(orders.id, data.order_ids),
+          inArray(orders.order_group_id, selectedGroupIds))).orderBy(asc(orders.id)).for("update");
         const selectedOrders = new Map<number, typeof orders.$inferSelect>();
-        for (const id of [...data.order_ids].sort((a, b) => a - b)) {
-          const [order] = await tx
-            .select()
-            .from(orders)
-            .where(eq(orders.id, id))
-            .for("update");
-          if (!order || order.status !== "SCHEDULING")
-            throw new WorkflowError(
-              "An order is no longer ready for scheduling. Refresh and try again.",
-            );
+        const requested = new Set(data.order_ids);
+        for (const id of data.order_ids) {
+          const order = locked.find(member => member.id === id);
+          if (!order || order.status !== "SCHEDULING") throw new WorkflowError("An order is no longer ready for scheduling. Refresh and try again.");
           selectedOrders.set(id, order);
+        }
+        const groups = new Set([...selectedOrders.values()].flatMap(order => order.order_group_id ? [order.order_group_id] : []));
+        for (const groupId of groups) {
+          const members = locked.filter(order => order.order_group_id === groupId);
+          if (members.some(order => order.status !== "SCHEDULING")) throw new WorkflowError("All orders in this group must have Scheduling status before the group can be scheduled.");
+          if (members.some(order => !requested.has(order.id))) throw new WorkflowError("Schedule every order in the group together. Partial group scheduling is not allowed.");
         }
         const [driverAccount] = await tx
           .select({ id: users.id })

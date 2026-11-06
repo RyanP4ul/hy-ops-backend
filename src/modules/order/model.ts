@@ -27,6 +27,18 @@ export const orderSchema = t.Object({
 
 export type OrderType = Static<typeof orderSchema>;
 
+export const savedShippingAddressSchema = t.Object({
+  address_line: t.String({ minLength: 1, maxLength: 255, pattern: "\\S" }),
+  barangay: t.String({ minLength: 1, maxLength: 100, pattern: "\\S" }),
+  city_municipality: t.String({ minLength: 1, maxLength: 100, pattern: "\\S" }),
+  province: t.String({ minLength: 1, maxLength: 100, pattern: "\\S" }),
+  postal_code: t.Optional(t.String({ maxLength: 20 })),
+  latitude: t.Number({ minimum: -90, maximum: 90 }),
+  longitude: t.Number({ minimum: -180, maximum: 180 }),
+});
+
+export type SavedShippingAddress = Static<typeof savedShippingAddressSchema>;
+
 export const orderItemSchema = t.Object({
   inventory_id: t.Numeric({ minimum: 1 }),
   quantity: t.Integer({ minimum: 1 }),
@@ -47,15 +59,37 @@ export const orderItemUpdateSchema = t.Object({
 
 export type OrderItemUpdateType = Static<typeof orderItemUpdateSchema>;
 
-export const orderModel = new Elysia().model({
-  "order.create": t.Object({
-    ...orderSchema.properties,
-    items: t.Array(
-      t.Object({
-        ...orderItemSchema.properties,
-      }),
-    ),
+export const orderCreateSchema = t.Object({
+  ...orderSchema.properties,
+  items: t.Array(orderItemSchema, { minItems: 1 }),
+});
+export type CreateOrderInput = Static<typeof orderCreateSchema>;
+
+const separateOrderBatchSchema = t.Object({
+  customer_id: t.Numeric({ minimum: 1 }),
+  payment_mode: t.Optional(t.Literal("SEPARATE")),
+  orders: t.Array(t.Omit(orderCreateSchema, ["customer_id"]), { minItems: 1, maxItems: 25 }),
+});
+const combinedOrderBatchSchema = t.Object({
+  customer_id: t.Numeric({ minimum: 1 }),
+  payment_mode: t.Literal("COMBINED"),
+  payment: t.Object({
+    payment_method: orderSchema.properties.payment_method,
+    payment_type: orderSchema.properties.payment_type,
+    amount_paid: t.Numeric({ minimum: 0.01, maximum: 9999999999.99 }),
+    reference_number: t.Optional(t.String({ maxLength: 100 })),
   }),
+  orders: t.Array(t.Object({
+    ...t.Omit(orderCreateSchema, ["customer_id", "payment_method", "payment_type", "payment_arrangement", "amount_paid"]).properties,
+    expected_total: t.Optional(t.Numeric({ minimum: 0 })),
+  }), { minItems: 1, maxItems: 25 }),
+});
+export const orderBatchSchema = t.Union([separateOrderBatchSchema, combinedOrderBatchSchema]);
+export type OrderBatchInput = Static<typeof orderBatchSchema>;
+
+export const orderModel = new Elysia().model({
+  "order.create": orderCreateSchema,
+  "order.batch": orderBatchSchema,
   "order.update": t.Object({
     ...orderUpdateSchema.properties,
   }),

@@ -94,6 +94,21 @@ describe.skipIf(!testUrl)("real database driver integration", () => {
     expect(reassigned.status).toBe(403);
     expect((await reassigned.json()).message).toContain("same authorized warehouse");
   });
+  test("staff can submit grouped orders only from their warehouse and drivers cannot create them", async () => {
+    await sql`insert into customer_addresses(customer_id,address_line,barangay,city_municipality,province,latitude,longitude) values(1,'Batch saved address','B','C','P','14.5','121.1')`;
+    const cookie = await login("staff@example.test");
+    const draft = { warehouse_id: 1, customer_address_id: 1, is_custom_shipping: false, payment_arrangement: "NET_30", payment_method: "CASH", amount_paid: 0, items: [{ inventory_id: 1, quantity: 1 }] };
+    const submit = (cookie: string, orders: object[]) => app.handle(new Request("http://localhost/orders/batch", {
+      method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ customer_id: 1, orders }),
+    }));
+    expect((await submit(cookie, [draft, { ...draft, warehouse_id: 2, items: [{ inventory_id: 2, quantity: 1 }] }])).status).toBe(403);
+    expect(await sql`select id from orders`).toHaveLength(2);
+    const response = await submit(cookie, [draft, draft]);
+    expect(response.status).toBe(200);
+    expect((await response.json()).orders).toHaveLength(2);
+    const driver = await login("driver1@example.test", true);
+    expect((await submit(driver, [draft, draft])).status).toBe(403);
+  });
   test("failed outcomes are idempotent; stock returns and reserves once at warehouse completion", async () => {
     const run = await schedule(); await delivery.dispatchDelivery(run.id, 1);
     const command = { version: 2, operationKey: crypto.randomUUID(), reason: "Store closed" };
@@ -117,6 +132,12 @@ describe.skipIf(!testUrl)("real database driver integration", () => {
     const cookie = await login("driver1@example.test", true);
     const command = { version: 2, operationKey: crypto.randomUUID() };
     const request = () => new Request(`http://localhost/driver/stops/${run.stopId}/delivered`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(command) });
+    const blocked = await app.handle(request());
+    expect(blocked.status).toBe(409);
+    expect((await blocked.json()).message).toContain("Submit Proof of Delivery");
+    expect(await sql`select * from driver_stop_outcomes`).toHaveLength(0);
+    expect((await service.trip(3, run.id)).stops[0].status).toBe("pending");
+    await require("./driver-fixture").seedStopProof(sql, run.stopId);
     expect((await app.handle(request())).status).toBe(200);
     expect((await app.handle(request())).status).toBe(200);
     expect(await sql`select * from payments`).toHaveLength(0);
@@ -126,6 +147,7 @@ describe.skipIf(!testUrl)("real database driver integration", () => {
   });
   test("concurrent conflicting outcomes commit exactly one result", async () => {
     const run = await schedule(); await delivery.dispatchDelivery(run.id, 1);
+    await require("./driver-fixture").seedStopProof(sql, run.stopId);
     const results = await Promise.allSettled([
       service.outcome(3, run.stopId, { version: 2, operationKey: crypto.randomUUID() }, "delivered"),
       service.outcome(3, run.stopId, { version: 2, operationKey: crypto.randomUUID(), reason: "Unavailable" }, "failed"),

@@ -1,3 +1,4 @@
+import { getOrderCombinedPayment } from "../payments/groups";
 import { db } from "@/db/index";
 import { invoice_payments, invoices } from "@/db/schema/invoice";
 import { inventory } from "@/db/schema/inventory";
@@ -104,6 +105,7 @@ export abstract class InvoiceService {
       payment_type: invoice.payment_type,
       payment_status: paymentStatus,
       amount_paid: amountPaid,
+      combined_payment: await getOrderCombinedPayment(order_id),
       customer: {
         name: invoice.customer_name,
         company_name: invoice.company_name,

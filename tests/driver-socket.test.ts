@@ -88,6 +88,34 @@ describe.skipIf(!url)("driver WebSocket integration", () => {
     expect((await ticketResponse(cookie)).status).toBe(401);
     expect((await app.handle(new Request("http://localhost/ws", { headers: { Upgrade: "websocket" } }))).status).toBe(401);
   });
+  test("scheduling and reassigning a delivery immediately notify only the affected drivers after commit", async () => {
+    const first = await connect(await login("driver1@example.test", true));
+    const secondCookie = await login("driver2@example.test", true);
+    const second = await connect(secondCookie);
+    const run = await require("../src/modules/deliveries/service").DeliveryService.createDelivery({
+      order_ids: [2], driver_id: 4, vehicle_id: 2,
+      scheduled_date: "2099-01-02", scheduled_time: "10:00", delivery_type: "INTERNAL",
+      delivery_allowance: 0, fuel: 0, toll: 0,
+    }, 2);
+    await waitFor(() => second.messages.some(m => m.type === "DRIVER_ASSIGNMENT_CHANGED" && m.payload.deliveryId === run.id && m.payload.kind === "assigned"));
+    expect(first.messages.some(m => m.type === "DRIVER_ASSIGNMENT_CHANGED" && m.payload.deliveryId === run.id)).toBe(false);
+    const response = await app.handle(new Request("http://localhost/driver/trips", { headers: { Cookie: secondCookie } }));
+    expect(response.status).toBe(200);
+    expect((await response.json()).items.some((trip: { id: number }) => Number(trip.id) === run.id)).toBe(true);
+    await database`update deliveries set driver_id=3, vehicle_id=1 where id=${run.id}`;
+    await waitFor(() => first.messages.some(m => m.type === "DRIVER_ASSIGNMENT_CHANGED" && m.payload.deliveryId === run.id && m.payload.kind === "assigned"));
+    await waitFor(() => second.messages.some(m => m.type === "DRIVER_ASSIGNMENT_CHANGED" && m.payload.deliveryId === run.id && m.payload.kind === "removed"));
+    const before = first.messages.filter(m => m.type === "DRIVER_ASSIGNMENT_CHANGED" && m.payload.deliveryId === run.id).length;
+    try {
+      await database.begin(async (tx: any) => {
+        await tx`update deliveries set departure_time='12:00' where id=${run.id}`;
+        throw new Error("Rollback assignment event");
+      });
+    } catch { /* Expected rollback. */ }
+    await Bun.sleep(100);
+    expect(first.messages.filter(m => m.type === "DRIVER_ASSIGNMENT_CHANGED" && m.payload.deliveryId === run.id)).toHaveLength(before);
+  });
+
   test("native cookie upgrade ingests real assigned GPS, rejects another driver, and invalidates website views", async () => {
     const driver = await connect(await login("driver1@example.test", true));
     const staff = await connect(await login("staff@example.test", false));
@@ -137,6 +165,7 @@ describe.skipIf(!url)("driver WebSocket integration", () => {
     const [stop] = await database`select id from deliveries_stops where delivery_id=${run.id}`;
     const service = require("../src/modules/driver/service").DriverService;
     const trip = await service.trip(3, run.id);
+    await require("./driver-fixture").seedStopProof(database, stop.id);
     await service.outcome(3, stop.id, { version: trip.version, operationKey: crypto.randomUUID() }, "delivered");
     const returns = require("../src/modules/deliveries/customer-returns").CustomerReturnService;
     const task = await returns.request({ sub: "2", role: "staff" }, stop.id, { reason: "Return fixture", operationKey: crypto.randomUUID() });

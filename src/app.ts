@@ -39,6 +39,7 @@ import { paymentRoutes } from "./modules/payments";
 import { dashboardRoutes } from "./modules/dashboard";
 import { AuditLogService } from "./modules/audit_logs/service";
 import { automationRoutes } from "./modules/automations";
+import { startBackupScheduler } from "./modules/automations/backup-service";
 import { createSmsRoutes } from "./modules/sms";
 import { deliveryEstimateRoutes } from "./modules/delivery-expenses";
 import { geocodingRoutes } from "./modules/geocode";
@@ -58,6 +59,7 @@ export function createApp(
   const authenticatedClaims = new WeakMap<Request, Record<string, any>>();
   let driverEvents: Awaited<ReturnType<typeof startDriverEvents>> | undefined;
   let deliveryNotifications: ReturnType<typeof startDeliveryNotificationWorker> | undefined;
+  let backupScheduler: Awaited<ReturnType<typeof startBackupScheduler>> | undefined;
   return (
     new Elysia()
       .onStart(async (app) => {
@@ -68,11 +70,15 @@ export function createApp(
 
         driverEvents = await startDriverEvents(process.env.DATABASE_URL as string);
         if (options.externalIntegrations !== false) deliveryNotifications = startDeliveryNotificationWorker(options.sms, options.emailSender);
-        if (options.automation !== false) await startAutomationTasks();
+        if (options.automation !== false) {
+          await startAutomationTasks();
+          if (options.externalIntegrations !== false) backupScheduler = await startBackupScheduler();
+        }
 		
 		console.log(`${process.env.NODE_ENV}: ${process.env.FRONTEND_URL}`);
       })
       .onStop(async () => {
+        backupScheduler?.stop();
         await deliveryNotifications?.stop();
         await driverEvents?.stop();
         await events?.stop();
@@ -152,12 +158,14 @@ export function createApp(
           };
         }
       })
+	  /*
        .onAfterResponse(({ request, set }) => {
          console.log(
            `[${request.method}] ${new URL(request.url).pathname}`,
            `→ ${set.status}`,
          );
        })
+	   */
       .guard(
         {
           beforeHandle: async ({

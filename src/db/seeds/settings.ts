@@ -40,12 +40,6 @@ const setting_lists: SettingInsert[] = [
     updated_at: Math.floor(Date.now() / 1000),
   },
   {
-    name: "customer_order_limit",
-    value: "1",
-    created_at: Math.floor(Date.now() / 1000),
-    updated_at: Math.floor(Date.now() / 1000),
-  },
-  {
     name: "max_order_per_vehicle",
     value: "5",
     created_at: Math.floor(Date.now() / 1000),

@@ -174,13 +174,339 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     expect(stock).toMatchObject({ quantity: 3, reserved: 0 });
   });
 
-  test("customer active-order limit is enforced under concurrent submission", async () => {
+  function batchInput(addressIds = [1, 1], quantity = 1) {
+    return { customer_id: 1, orders: addressIds.map(customer_address_id => ({
+      warehouse_id: 1, payment_method: "CASH" as const, payment_arrangement: "NET_30" as const,
+      amount_paid: 0, is_custom_shipping: false, customer_address_id,
+      items: [{ inventory_id: 1, quantity }],
+    })) };
+  }
+
+  function combinedInput(amount = 10) {
+    return { customer_id: 1, payment_mode: "COMBINED" as const,
+      payment: { payment_method: "BANK_TRANSFER" as const, payment_type: "BDO", amount_paid: amount, reference_number: "BANK-ONE-RECEIPT" },
+      orders: batchInput([1, 1]).orders.map((order, index) => ({ ...order, items: [{ inventory_id: 1, quantity: index + 1 }] })),
+    };
+  }
+
+  test("every batch retains an independent order group for separate and combined payment", async () => {
+    await seed(); await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 100 });
+    for (const input of [batchInput(), combinedInput()]) {
+      const created = await OrderService.createOrders(input);
+      const members = await sql`select order_group_id, order_group_position from orders where id in ${sql(created.map(row => row.id))} order by id`;
+      expect(members[0].order_group_id).toBeTruthy();
+      expect(members[1].order_group_id).toBe(members[0].order_group_id);
+      expect(members.map(row => row.order_group_position)).toEqual([1, 2]);
+      const detail = await OrderService.getOrderById(created[0].id);
+      expect(detail?.order_group_number).toStartWith("OG-");
+      expect(detail?.order_group_size).toBe(2);
+      expect((await OrderService.getOrderTableRowById(created[1].id))?.order_group_id).toBe(members[0].order_group_id);
+    }
+    expect(await sql`select * from order_groups`).toHaveLength(2);
+    const single = await stockOrder();
+    expect((await OrderService.getOrderById(single.id))?.order_group_id).toBeNull();
+    await rejected(() => OrderService.createOrders({ ...batchInput(), customer_id: 999999 }), "Customer not found");
+    expect(await sql`select * from order_groups`).toHaveLength(2);
+  });
+
+  test("scheduling entries paginate complete groups and wait for every member", async () => {
+    await seed(); await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 100 });
+    const created = await OrderService.createOrders(batchInput(Array(25).fill(1)));
+    const detail = (await OrderService.getOrderById(created[0].id))!;
+    const groupId = detail.order_group_id!;
+    for (const member of created.slice(0, 24)) {
+      await OrderService.processOrder(member.id, 1); await OrderService.deliveryOrder(member.id, 2);
+    }
+    await rejected(() => OrderService.getReadyOrderGroup(groupId, 1), "All orders");
+    const waiting = await OrderService.getSchedulingEntries(0, 1, detail.order_group_number!, 1);
+    expect(waiting.total).toBe(1); expect(waiting.rows).toHaveLength(1);
+    expect(waiting.rows[0]).toMatchObject({ ready_count: 24, total_members: 25, can_schedule: false });
+    expect(waiting.rows[0].members).toHaveLength(25);
+    const last = created[24];
+    expect((await OrderService.getSchedulingEntries(0, 1, (await OrderService.getOrderById(last.id))!.order_number, 1)).total).toBe(1);
+    await OrderService.processOrder(last.id, 1); await OrderService.deliveryOrder(last.id, 2);
+    const group = await OrderService.getReadyOrderGroup(groupId, 1);
+    expect(group.rows.map(row => row.id)).toEqual(created.map(row => row.id));
+    expect((await OrderService.getSchedulingEntries(0, 1, detail.order_group_number!, 1)).rows[0].can_schedule).toBe(true);
+    await rejected(() => OrderService.getReadyOrderGroup(groupId, 2), "not found");
+    const single = await stockOrder(); await OrderService.processOrder(single.id, 1); await OrderService.deliveryOrder(single.id, 2);
+    const page1 = await OrderService.getSchedulingEntries(0, 1, "", 1);
+    const page2 = await OrderService.getSchedulingEntries(1, 1, "", 1);
+    expect(page1.total).toBe(2); expect(page2.total).toBe(2);
+    expect(page1.rows[0].id).not.toBe(page2.rows[0].id);
+    expect([...page1.rows, ...page2.rows].find(row => row.order_group_id === groupId)?.members).toHaveLength(25);
+  });
+
+  test("group scheduling rejects unready and partial groups atomically and concurrent runs schedule once", async () => {
+    const { data } = await readyDelivery();
+    const created = await OrderService.createOrders(batchInput());
+    const groupId = (await OrderService.getOrderById(created[0].id))!.order_group_id!;
+    await OrderService.processOrder(created[0].id, 1); await OrderService.deliveryOrder(created[0].id, 2);
+    await rejected(() => DeliveryService.createDelivery({ ...data, order_ids: [created[0].id] }), "All orders");
+    expect(await sql`select * from deliveries`).toHaveLength(0);
+    expect(await sql`select * from deliveries_stops`).toHaveLength(0);
+    await OrderService.processOrder(created[1].id, 1); await OrderService.deliveryOrder(created[1].id, 2);
+    await rejected(() => DeliveryService.createDelivery({ ...data, order_ids: [created[0].id] }), "every order");
+    expect((await OrderService.getReadyOrderGroup(groupId, 1)).rows).toHaveLength(2);
+    const outcomes = await Promise.allSettled([1, 2].map(() => DeliveryService.createDelivery({ ...data, order_ids: created.map(row => row.id) })));
+    expect(outcomes.filter(outcome => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(await sql`select * from deliveries`).toHaveLength(1);
+    expect(await sql`select * from deliveries_stops`).toHaveLength(2);
+    expect((await sql`select status from orders where order_group_id=${groupId}`).every(row => row.status === "SCHEDULED")).toBe(true);
+    await rejected(() => OrderService.getReadyOrderGroup(groupId, 1), "All orders");
+    expect((await OrderService.getSchedulingEntries(0, 10, "", 1)).rows.some(row => row.order_group_id === groupId)).toBe(false);
+  });
+
+  test("cross warehouse groups stay blocked and do not expose other warehouse destinations", async () => {
+    await seed(); await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 100 });
+    await sql`insert into warehouses (name,street_address,city,state,zip_code,created_at,updated_at) values ('Other','Street','City','Province','0000',0,0)`;
+    await InventoryService.createInventory({ warehouse_id: 2, product_variant_id: 1, quantity: 100 });
+    const input = batchInput(); input.orders[1].warehouse_id = 2; input.orders[1].items[0].inventory_id = 2;
+    const created = await OrderService.createOrders(input);
+    for (const member of created) { await OrderService.processOrder(member.id, 1); await OrderService.deliveryOrder(member.id, 2); }
+    const groupId = (await OrderService.getOrderById(created[0].id))!.order_group_id!;
+    const scoped = await OrderService.getSchedulingEntries(0, 10, "", 1);
+    expect(scoped.total).toBe(1); expect(scoped.rows[0].members.map(row => row.id)).toEqual([created[0].id]);
+    expect(scoped.rows[0]).toMatchObject({ total_members: 2, ready_count: 1, can_schedule: false });
+    await rejected(() => OrderService.getReadyOrderGroup(groupId, 1), "warehouse");
+    expect((await OrderService.getSchedulingEntries(0, 10)).rows[0].can_schedule).toBe(false);
+  });
+
+  test("combined payment persists one receipt source with exact allocations and independent invoices", async () => {
+    await seed();
+    await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
+    const created = await OrderService.createOrders(combinedInput());
+    const groups = await sql`select * from payment_groups`;
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ amount: "10.00", payment_method: "BANK_TRANSFER", payment_type: "BDO", reference_number: "BANK-ONE-RECEIPT" });
+    expect((await sql`select amount from payment_group_allocations order by payment_id`).map(row => row.amount)).toEqual(["3.33", "6.67"]);
+    expect((await sql`select sum(amount)::text as amount from payments`)[0].amount).toBe("10.00");
+    expect((await sql`select sum(amount)::text as amount from payment_receipts`)[0].amount).toBe("10.00");
+    const timestamps = await sql`select received_at from payment_receipts`;
+    expect(timestamps.every(row => row.received_at.getTime() === groups[0].received_at.getTime())).toBe(true);
+    const first = await InvoiceService.getInvoiceByOrderId(created[0].id);
+    const second = await InvoiceService.getInvoiceByOrderId(created[1].id);
+    expect(first).toMatchObject({ amount_paid: 3.33, combined_payment: { payment_number: groups[0].payment_number, amount: 10, allocated_amount: 3.33 } });
+    expect(second).toMatchObject({ amount_paid: 6.67, combined_payment: { payment_number: groups[0].payment_number, allocated_amount: 6.67 } });
+    expect((await OrderService.getOrderById(created[0].id))?.payment_arrangement).toBe("PARTIALLY_PAID");
+    const list = await PaymentService.getPayments(0, 10, groups[0].payment_number);
+    expect(list.rows).toHaveLength(2);
+    expect(list.rows.reduce((sum, row) => sum + Number(row.amount), 0)).toBe(10);
+    expect((await PaymentService.getPayments(0, 10, "BANK-ONE-RECEIPT")).total).toBe(2);
+    await sql`insert into users(email,name,password_hash,role,created_at,updated_at) values ('combined-driver@example.test','Driver','fixture','driver',0,0)`;
+    await sql`insert into drivers(user_id,warehouse_id,phone_number) values (4,1,'09000000000')`;
+    await sql`insert into vehicles(warehouse_id,plate_number,image,created_at,updated_at) values (1,'COMBINED-001','',0,0)`;
+    for (const order of created) { await OrderService.processOrder(order.id, 1); await OrderService.deliveryOrder(order.id, 2); }
+    const run = await DeliveryService.createDelivery({ order_ids: created.map(order => order.id), scheduled_date: "2099-01-01", scheduled_time: "09:00", delivery_type: "INTERNAL", driver_id: 4, vehicle_id: 1, delivery_allowance: 0, fuel: 0, toll: 0 });
+    const trip = await require("../src/modules/driver/service").DriverService.trip(4, run.id);
+    expect(trip.stops.find((stop: any) => stop.orderId === created[0].id)).toMatchObject({ combinedPaymentNumber: groups[0].payment_number, combinedPaymentAllocation: 3.33, collectNow: "9.01" });
+    expect(trip.stops.find((stop: any) => stop.orderId === created[1].id)).toMatchObject({ combinedPaymentAllocation: 6.67, collectNow: "18.01" });
+    expect(trip.stops[0]).not.toHaveProperty("combinedPaymentAmount");
+  });
+
+  test("combined receipt allocations remain traceable after one order is cancelled, refunded or paid later", async () => {
+    await seed();
+    await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
+    const created = await OrderService.createOrders(combinedInput());
+    const receipts = await sql`select * from payments order by order_id`;
+    await OrderService.cancelOrder(created[0].id, 1);
+    await PaymentService.refund({ payment_number: receipts[0].payment_number, amount: 3.33, version: 1, reason: "Only the first order was cancelled", request_id: crypto.randomUUID() }, 1);
+    expect((await InvoiceService.getInvoiceByOrderId(created[0].id)).amount_paid).toBe(0);
+    expect((await InvoiceService.getInvoiceByOrderId(created[1].id)).amount_paid).toBe(6.67);
+    await PaymentService.updatePayment({ payment_number: receipts[1].payment_number, version: 1, payment_amount: 1 });
+    expect((await InvoiceService.getInvoiceByOrderId(created[1].id)).amount_paid).toBe(7.67);
+    expect((await sql`select amount from payment_groups`)[0].amount).toBe("10.00");
+    expect((await sql`select amount from payment_group_allocations order by payment_id`).map(row => row.amount)).toEqual(["3.33", "6.67"]);
+    expect((await sql`select sum(amount)::text as amount from payment_receipts`)[0].amount).toBe("11.00");
+    expect((await sql`select sum(amount)::text as amount from payment_refunds`)[0].amount).toBe("3.33");
+  });
+
+  test("combined payments handle full payments, one-cent rounding and rollback before any partial commit", async () => {
+    for (const amount of [37.02, 0.01]) {
+      await seed();
+      await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
+      const created = await OrderService.createOrders(combinedInput(amount));
+      const rows = await sql`select amount from payments order by order_id`;
+      expect(rows.map(row => row.amount)).toEqual(amount === 37.02 ? ["12.34", "24.68"] : ["0.00", "0.01"]);
+      if (amount === 37.02) for (const order of created) expect((await OrderService.getOrderById(order.id))?.payment_arrangement).toBe("FULLY_PAID");
+    }
+    for (const kind of ["overpayment", "address", "stock", "precision", "type"]) {
+      await seed();
+      await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: kind === "stock" ? 2 : 10 });
+      const input = combinedInput(kind === "overpayment" ? 100 : kind === "precision" ? 1.001 : 10);
+      if (kind === "address") input.orders[1].customer_address_id = 99999;
+      if (kind === "type") input.payment.payment_type = " ";
+      await rejected(() => OrderService.createOrders(input), kind === "address" || kind === "stock" ? "Order 2:" : kind === "precision" ? "decimal" : kind === "type" ? "payment type" : "cannot exceed");
+      expect(await sql`select id from orders`).toHaveLength(0);
+      expect(await sql`select id from payment_groups`).toHaveLength(0);
+      expect(await sql`select group_id from payment_group_allocations`).toHaveLength(0);
+      expect(await sql`select id from payments`).toHaveLength(0);
+      expect((await sql`select reserved from inventory`)[0].reserved).toBe(0);
+    }
+  });
+
+  test("a failed combined allocation insert rolls back orders, original receipt and reservations", async () => {
+    await seed();
+    await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
+    await sql`alter table payment_group_allocations add constraint fixture_reject_allocation check (amount = 0)`;
+    try {
+      let failed = false;
+      try { await OrderService.createOrders(combinedInput()); } catch { failed = true; }
+      expect(failed).toBe(true);
+      expect(await sql`select id from orders`).toHaveLength(0);
+      expect(await sql`select id from payment_groups`).toHaveLength(0);
+      expect(await sql`select id from payments`).toHaveLength(0);
+      expect(await sql`select id from invoices`).toHaveLength(0);
+      expect((await sql`select reserved from inventory`)[0].reserved).toBe(0);
+    } finally { await sql`alter table payment_group_allocations drop constraint fixture_reject_allocation`; }
+  });
+
+  test("concurrent combined submissions keep one complete receipt and cannot oversell", async () => {
+    await seed();
+    await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 5 });
+    const results = await Promise.allSettled([OrderService.createOrders(combinedInput()), OrderService.createOrders(combinedInput())]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(await sql`select id from orders`).toHaveLength(2);
+    expect(await sql`select id from payment_groups`).toHaveLength(1);
+    expect(await sql`select group_id from payment_group_allocations`).toHaveLength(2);
+    expect((await sql`select sum(amount)::text as amount from payments`)[0].amount).toBe("10.00");
+    expect((await sql`select reserved from inventory`)[0].reserved).toBe(3);
+  });
+
+  test("combined allocations reject stale reviewed prices rather than creating unexpected balances", async () => {
+    await seed();
+    await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
+    const input = combinedInput(37.02);
+    const reviewed = { ...input, orders: input.orders.map((order, index) => ({ ...order, expected_total: index === 0 ? 12.34 : 24.68 })) };
+    await sql`update product_variants set price=13`;
+    await rejected(() => OrderService.createOrders(reviewed), "prices changed");
+    expect(await sql`select id from orders`).toHaveLength(0);
+    expect(await sql`select id from payment_groups`).toHaveLength(0);
+  });
+
+  test("one submission creates independent orders, saved destinations, receipts, invoices and mobile stops", async () => {
+    await seed();
+    await sql`insert into users (email,name,password_hash,role,created_at,updated_at) values ('driver@example.test','Driver','fixture','driver',0,0)`;
+    await sql`insert into drivers (user_id,warehouse_id,phone_number) values (4,1,'09000000000')`;
+    await sql`insert into vehicles (warehouse_id,plate_number,image,created_at,updated_at) values (1,'BATCH-001','',0,0)`;
+    await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
+    const address = await OrderService.saveShippingAddress(1, { address_line: "Batch second destination", barangay: "B", city_municipality: "C", province: "P", latitude: 14.7, longitude: 121.3 });
+    const input = batchInput([1, address.id], 2);
+    input.orders[0].amount_paid = 5;
+    const created = await OrderService.createOrders(input);
+    expect(created).toHaveLength(2);
+    expect(created[0].id).not.toBe(created[1].id);
+    expect((await sql`select reserved from inventory`)[0].reserved).toBe(4);
+    expect((await OrderService.getOrderById(created[0].id))).toMatchObject({ customer_address_id: 1, amount_paid: 5 });
+    expect((await OrderService.getOrderById(created[1].id))).toMatchObject({ customer_address_id: address.id, amount_paid: 0 });
+    expect((await InvoiceService.getInvoiceByOrderId(created[0].id)).customer.address).toContain("123 Test St");
+    expect((await InvoiceService.getInvoiceByOrderId(created[1].id)).customer.address).toContain("Batch second destination");
+    expect(await sql`select id from payments`).toHaveLength(2);
+    expect(await sql`select id from invoices`).toHaveLength(2);
+    for (const order of created) {
+      await OrderService.processOrder(order.id, 1);
+      await OrderService.deliveryOrder(order.id, 2);
+    }
+    const run = await DeliveryService.createDelivery({ order_ids: created.map(order => order.id), scheduled_date: "2099-01-01", scheduled_time: "09:00", delivery_type: "INTERNAL", driver_id: 4, vehicle_id: 1, delivery_allowance: 0, fuel: 0, toll: 0 });
+    const trip = await require("../src/modules/driver/service").DriverService.trip(4, run.id);
+    expect(trip.stops).toHaveLength(2);
+    expect(trip.stops.find((stop: any) => stop.orderId === created[0].id)).toMatchObject({ paid: "5.00", latitude: "14.500000" });
+    expect(trip.stops.find((stop: any) => stop.orderId === created[1].id)).toMatchObject({ paid: "0.00", latitude: "14.700000" });
+  });
+
+  test("an invalid later order rolls back the entire submission including stock, receipts and invoices", async () => {
+    for (const failure of ["stock", "address", "payment"]) {
+      await seed();
+      await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 5 });
+      const input = batchInput([1, 1], 3);
+      if (failure === "address") { input.orders[1].customer_address_id = 99999; input.orders[1].items[0].quantity = 1; }
+      if (failure === "payment") { input.orders[1].amount_paid = 100; input.orders[1].items[0].quantity = 1; }
+      await rejected(() => OrderService.createOrders(input), "Order 2:");
+      expect(await sql`select id from orders`).toHaveLength(0);
+      expect(await sql`select id from order_groups`).toHaveLength(0);
+      expect(await sql`select id from order_items`).toHaveLength(0);
+      expect(await sql`select id from payments`).toHaveLength(0);
+      expect(await sql`select id from invoices`).toHaveLength(0);
+      expect((await sql`select quantity,reserved from inventory`)[0]).toMatchObject({ quantity: 5, reserved: 0 });
+    }
+  });
+
+  test("concurrent group submissions cannot partially commit or oversell shared inventory", async () => {
+    await seed();
+    await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
+    const outcomes = await Promise.allSettled([OrderService.createOrders(batchInput([1, 1], 3)), OrderService.createOrders(batchInput([1, 1], 3))]);
+    expect(outcomes.filter(outcome => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(await sql`select id from orders`).toHaveLength(2);
+    expect(await sql`select id from invoices`).toHaveLength(2);
+    expect((await sql`select reserved from inventory`)[0].reserved).toBe(6);
+  });
+
+  test("one customer can create concurrent active orders with separate saved destinations despite a legacy limit", async () => {
     await seed();
     await sql`update settings set value='1' where name='customer_order_limit'`;
     await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
-    const outcomes = await Promise.allSettled([stockOrder(), stockOrder()]);
-    expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-    expect(await sql`select id from orders`).toHaveLength(1);
+    const address = await OrderService.saveShippingAddress(1, { address_line: "Second destination", barangay: "Other barangay", city_municipality: "Other city", province: "Province", latitude: 14.7, longitude: 121.3 });
+    const created = await Promise.all([stockOrder(1, 5), stockOrder(2, 0, 1, address.id)]);
+    expect(created).toHaveLength(2);
+    expect((await OrderService.getCustomerOrderEligibility(1))).toMatchObject({ eligible: true, activeOrderCount: 2, maxActiveOrders: null });
+    const first = await OrderService.getOrderById(created[0].id);
+    const second = await OrderService.getOrderById(created[1].id);
+    expect(first).toMatchObject({ customer_address_id: 1, shipping_latitude: "14.500000", shipping_longitude: "121.100000", amount_paid: 5 });
+    expect(second).toMatchObject({ customer_address_id: address.id, shipping_latitude: "14.700000", shipping_longitude: "121.300000", amount_paid: 0 });
+    expect(first?.shipping_address).toContain("123 Test St");
+    expect(second?.shipping_address).toContain("Second destination");
+    expect((await OrderService.getOrders(0, 10, "Second destination")).rows.map(row => row.id)).toEqual([created[1].id]);
+    await sql`update customer_addresses set address_line='Edited later',latitude='15',longitude='122' where id=${address.id}`;
+    expect((await OrderService.getOrderById(created[1].id))?.shipping_address).toContain("Second destination");
+    expect((await InvoiceService.getInvoiceByOrderId(created[0].id)).customer.address).toContain("123 Test St");
+    expect((await InvoiceService.getInvoiceByOrderId(created[1].id)).customer.address).toContain("Second destination");
+    await OrderService.cancelOrder(created[0].id, 1);
+    expect((await OrderService.getOrderById(created[1].id))?.status).toBe("PENDING");
+    expect((await sql`select reserved from inventory`)[0].reserved).toBe(2);
+    await sql`delete from settings where name='customer_order_limit'`;
+    expect((await stockOrder()).id).toBeGreaterThan(0);
+  });
+
+  test("checkout requires an address owned by the customer and uses saved coordinates", async () => {
+    await seed();
+    await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
+    const input = { warehouse_id: 1, customer_id: 1, payment_method: "CASH" as const, payment_arrangement: "NET_30" as const, amount_paid: 0, is_custom_shipping: false, customer_address_id: 1, items: [{ inventory_id: 1, quantity: 1 }] };
+    await rejected(() => OrderService.createOrder({ ...input, customer_address_id: undefined }), "saved shipping address");
+    await rejected(() => OrderService.createOrder({ ...input, is_custom_shipping: true, shipping_address: "Unsaved destination" }), "saved shipping address");
+    await sql`insert into customers (user_id,company_name,phone_number) values (2,'Other','09000000001')`;
+    const [foreign] = await sql`insert into customer_addresses (customer_id,address_line,barangay,city_municipality,province) values (2,'Foreign destination','B','C','P') returning id`;
+    await rejected(() => OrderService.createOrder({ ...input, customer_address_id: foreign.id }), "this customer's saved");
+    expect(await sql`select id from orders`).toHaveLength(0);
+    expect((await sql`select reserved from inventory`)[0].reserved).toBe(0);
+    const order = await OrderService.createOrder({ ...input, shipping_latitude: 16, shipping_longitude: 123, shipping_address: "Spoofed destination" });
+    expect(await OrderService.getOrderById(order.id)).toMatchObject({ shipping_latitude: "14.500000", shipping_longitude: "121.100000" });
+    await rejected(() => OrderService.saveShippingAddress(1, { address_line: "Street", barangay: "B", city_municipality: "C", province: "P", latitude: 0, longitude: 0 }), "coordinates");
+  });
+
+  test("same-customer orders keep independent stops, navigation, payments and outcomes", async () => {
+    const { order: first, data } = await readyDelivery();
+    const address = await OrderService.saveShippingAddress(1, { address_line: "Second stop", barangay: "B", city_municipality: "C", province: "P", latitude: 14.7, longitude: 121.3 });
+    const second = await stockOrder(1, 5, 1, address.id);
+    await OrderService.processOrder(second.id, 1);
+    await OrderService.deliveryOrder(second.id, 2);
+    const run = await DeliveryService.createDelivery({ ...data, order_ids: [first.id, second.id] });
+    const { DriverService } = require("../src/modules/driver/service");
+    const trip = await DriverService.trip(4, run.id);
+    expect(trip.stops).toHaveLength(2);
+    const firstStop = trip.stops.find((stop: any) => stop.orderId === first.id);
+    const secondStop = trip.stops.find((stop: any) => stop.orderId === second.id);
+    expect(firstStop).toMatchObject({ latitude: "14.500000", longitude: "121.100000", paid: "0.00" });
+    expect(secondStop).toMatchObject({ latitude: "14.700000", longitude: "121.300000", paid: "5.00" });
+    expect(secondStop.address).toContain("Second stop");
+    expect(firstStop.id).not.toBe(secondStop.id);
+    expect(firstStop.orderNumber).not.toBe(secondStop.orderNumber);
+    await DeliveryService.dispatchDelivery(run.id, 1);
+    await require("./driver-fixture").seedStopProof(sql, firstStop.id, 4);
+    await DriverService.outcome(4, firstStop.id, { version: 2, operationKey: crypto.randomUUID() }, "delivered");
+    const remaining = await DriverService.trip(4, run.id);
+    expect(remaining.stops.find((stop: any) => stop.id === secondStop.id).status).toBe("pending");
+    expect((await OrderService.getOrderById(second.id))?.status).toBe("IN_TRANSIT");
+    expect((await OrderService.getOrderById(second.id))?.amount_paid).toBe(5);
   });
 
   test("overpayment rolls back order, payment, and reservation", async () => {

@@ -30,6 +30,7 @@ describe.skipIf(!testUrl)("customer return retrieval", () => {
     const [stop] = await sql`select id from deliveries_stops where delivery_id=${run.id}`;
     await rejects(returns.request(staff, stop.id, { reason: "Return", operationKey: crypto.randomUUID() }), "already delivered");
     await delivery.dispatchDelivery(run.id, 1);
+    await require("./driver-fixture").seedStopProof(sql, stop.id);
     await driver.outcome(3, stop.id, { version: 2, operationKey: crypto.randomUUID() }, "delivered");
     return { run: run.id, stop: stop.id };
   }
@@ -190,6 +191,7 @@ describe.skipIf(!testUrl)("customer return retrieval", () => {
     await delivery.dispatchDelivery(outbound.id, 1);
     await returns.assign(staff, task.id, { version: 1, vehicleId: 1, driverId: 3, operationKey: crypto.randomUUID() });
     const trip = await driver.trip(3, outbound.id);
+    await require("./driver-fixture").seedStopProof(sql, trip.stops[0].id);
     await driver.outcome(3, trip.stops[0].id, { version: trip.version, operationKey: crypto.randomUUID() }, "delivered");
     expect((await driver.trip(3, outbound.id)).status).toBe("in_transit");
     await returns.collect(3, task.id, { version: 2, operationKey: crypto.randomUUID() });

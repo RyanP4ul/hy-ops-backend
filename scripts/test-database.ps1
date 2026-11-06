@@ -1,4 +1,4 @@
-param([ValidateSet('Database', 'Driver', 'Live', 'Mobile')][string]$Suite = 'Database', [ValidateSet('All', 'Selected', 'DashboardReports', 'Orders', 'Deliveries', 'UIUX', 'Operations', 'Authorization', 'Driver')][string]$BrowserScope = 'All', [string]$BrowserFilter = '')
+param([ValidateSet('Database', 'Driver', 'Live', 'Mobile', 'Backup', 'Realtime')][string]$Suite = 'Database', [ValidateSet('All', 'Selected', 'DashboardReports', 'Orders', 'Deliveries', 'UIUX', 'Operations', 'Authorization', 'Driver')][string]$BrowserScope = 'All', [string]$BrowserFilter = '')
 $ErrorActionPreference = 'Stop'
 $backendRoot = Split-Path -Parent $PSScriptRoot
 $pgBin = Split-Path -Parent (Get-Command psql.exe -ErrorAction Stop).Source
@@ -31,10 +31,14 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Schema export failed.' }
   & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f $schemaPath
   if ($LASTEXITCODE -ne 0) { throw 'Fixture schema creation failed.' }
-  # Reconstruct only the columns/tables changed by the five incremental migrations.
+  # Reconstruct only the columns/tables changed by the incremental migrations.
   # The target is always the new, empty loopback fixture created above.
   $legacyPath = Join-Path $fixtureRoot 'legacy-columns.sql'
   @'
+DROP TABLE payment_group_allocations;
+DROP TABLE payment_groups;
+ALTER TABLE orders DROP COLUMN order_group_id, DROP COLUMN order_group_position;
+DROP TABLE order_groups;
 DROP TABLE customer_returns;
 DROP TABLE driver_stop_proofs;
 DROP TABLE driver_stop_outcomes;
@@ -58,8 +62,16 @@ ALTER TABLE orders ADD CONSTRAINT orders_warehouse_id_users_id_fk FOREIGN KEY (w
     & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Join-Path $backendRoot "src/db/_migrations/$migration")
     if ($LASTEXITCODE -ne 0) { throw "Fixture migration failed: $migration" }
   }
+  & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Join-Path $backendRoot 'src/db/migrations/0004_driver_assignment_events.sql')
+  if ($LASTEXITCODE -ne 0) { throw 'Driver assignment trigger migration failed.' }
+  & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Join-Path $backendRoot 'src/db/migrations/0005_payment_groups.sql')
+  if ($LASTEXITCODE -ne 0) { throw 'Combined payment migration failed.' }
+  & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Join-Path $backendRoot 'src/db/migrations/0006_order_groups.sql')
+  if ($LASTEXITCODE -ne 0) { throw 'Order group migration failed.' }
   $env:HYOPS_TEST_DATABASE_URL = "postgres://hyops_test@127.0.0.1:$fixturePort/hyops_test"
-  if ($Suite -eq 'Mobile') { & bun run ./tests/mobile/runner.ts }
+  if ($Suite -eq 'Realtime') { & bun test --timeout 30000 ./tests/driver-socket.test.ts }
+  elseif ($Suite -eq 'Backup') { & bun test --timeout 30000 ./tests/backup-schedule.test.ts }
+  elseif ($Suite -eq 'Mobile') { & bun run ./tests/mobile/runner.ts }
   elseif ($Suite -eq 'Live') { & bun run ./tests/live/runner.ts $BrowserScope $BrowserFilter }
   elseif ($Suite -eq 'Driver') {
     & bun test --timeout 60000 ./tests/driver.test.ts

@@ -8,6 +8,8 @@ import {
   orders,
   payment_refunds,
   payment_receipts,
+  payment_groups,
+  payment_group_allocations,
 } from "@/db/schema";
 import { PaymentInsert, payments } from "@/db/schema/payment";
 import {
@@ -101,6 +103,8 @@ export abstract class PaymentService {
     const searchQuery = search
       ? or(
           ilike(payments.payment_number, `%${search}%`),
+          ilike(payment_groups.payment_number, `%${search}%`),
+          ilike(payment_groups.reference_number, `%${search}%`),
           ilike(payments.reference_number, `%${search}%`),
           ilike(users.name, `%${search}%`),
           ilike(sql`${payments.payment_status}::text`, `%${search}%`),
@@ -110,6 +114,8 @@ export abstract class PaymentService {
     const [totalResult] = await db
       .select({ count: count() })
       .from(payments)
+      .leftJoin(payment_group_allocations, eq(payment_group_allocations.payment_id, payments.id))
+      .leftJoin(payment_groups, eq(payment_groups.id, payment_group_allocations.group_id))
       .leftJoin(customers, eq(payments.customer_id, customers.id))
       .leftJoin(users, eq(customers.user_id, users.id))
       .where(and(searchQuery));
@@ -118,6 +124,10 @@ export abstract class PaymentService {
       .select({
         id: payments.id,
         payment_number: payments.payment_number,
+        combined_payment_number: payment_groups.payment_number,
+        combined_payment_amount: payment_groups.amount,
+        combined_payment_allocation: payment_group_allocations.amount,
+        combined_payment_reference: payment_groups.reference_number,
         order_id: payments.order_id,
         customer_id: payments.customer_id,
         customer_name: users.name,
@@ -138,6 +148,8 @@ export abstract class PaymentService {
         version: payments.version,
       })
       .from(payments)
+      .leftJoin(payment_group_allocations, eq(payment_group_allocations.payment_id, payments.id))
+      .leftJoin(payment_groups, eq(payment_groups.id, payment_group_allocations.group_id))
       .leftJoin(customers, eq(payments.customer_id, customers.id))
       .leftJoin(users, eq(customers.user_id, users.id))
       .leftJoin(orderTotals, eq(payments.order_id, orderTotals.orderId))

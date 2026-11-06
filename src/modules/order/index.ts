@@ -1,9 +1,6 @@
 import Elysia, { t } from "elysia";
-import { orderModel } from "./model";
-import {
-  CustomerOrderLimitReachedError,
-  OrderService,
-} from "./service";
+import { orderModel, savedShippingAddressSchema } from "./model";
+import { OrderService } from "./service";
 import { AuthUser } from "../auth/schema";
 import { staffWarehouse, assertOrderScope } from "../deliveries/scope";
 import { WorkflowError } from "../../utils/workflow-error";
@@ -11,6 +8,11 @@ import { WorkflowError } from "../../utils/workflow-error";
 export const orderRoutes = new Elysia({ prefix: "/orders" })
   .decorate("user", {} as AuthUser)
   .use(orderModel)
+  .post("/customers/:customerId/addresses", ({ params, body }) =>
+    OrderService.saveShippingAddress(params.customerId, body), {
+    params: t.Object({ customerId: t.Numeric({ minimum: 1 }) }),
+    body: savedShippingAddressSchema,
+  })
   .get("/", async ({ query, set }) => {
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;
@@ -48,6 +50,11 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
       }),
     },
   )
+  .get("/groups/:groupId/ready", async ({ params, query, user }) => {
+    const assigned = await staffWarehouse(user);
+    if (assigned !== undefined && assigned !== query.warehouse_id) throw new WorkflowError("Choose your assigned warehouse.", 403);
+    return OrderService.getReadyOrderGroup(params.groupId, assigned ?? query.warehouse_id);
+  }, { params: t.Object({ groupId: t.String({ format: "uuid" }) }), query: t.Object({ warehouse_id: t.Numeric({ minimum: 1 }) }) })
   .get("/details", async ({ query }) => {
     const order_ids = query.ids ? query.ids.split(",").map(Number) : [];
     return await OrderService.getOrderDetailsByIds(order_ids);
@@ -67,27 +74,23 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
     body: t.Object({ version: t.Integer({ minimum: 1 }), latitude: t.Number({ minimum: -90, maximum: 90 }), longitude: t.Number({ minimum: -180, maximum: 180 }) }),
   })
+  .post("/batch", async ({ body, user }) => {
+    const warehouseId = await staffWarehouse(user);
+    if (warehouseId !== undefined && body.orders.some(order => order.warehouse_id !== warehouseId)) {
+      throw new WorkflowError("All orders must use your assigned warehouse.", 403);
+    }
+    const created = await OrderService.createOrders(body);
+    const rows = await Promise.all(created.map(order => OrderService.getOrderTableRowById(order.id)));
+    if (rows.some(row => !row)) throw new Error("Failed to load created orders.");
+    return { orders: rows, message: `${rows.length} orders created successfully.` };
+  }, { body: "order.batch" })
   .post(
     "/",
     async ({ body, set }) => {
-      try {
-        const result = await OrderService.createOrder(body);
-        const order = await OrderService.getOrderTableRowById(result.id);
-
-        if (!order) throw new Error("Failed to load created order.");
-
-        return order;
-      } catch (error) {
-        if (error instanceof CustomerOrderLimitReachedError) {
-          set.status = 409;
-          return {
-            ...error.eligibility,
-            code: error.code,
-            message: error.message,
-          };
-        }
-        throw error;
-      }
+      const result = await OrderService.createOrder(body);
+      const order = await OrderService.getOrderTableRowById(result.id);
+      if (!order) throw new Error("Failed to load created order.");
+      return order;
     },
     {
       body: "order.create",

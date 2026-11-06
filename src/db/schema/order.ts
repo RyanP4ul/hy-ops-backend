@@ -16,6 +16,7 @@ import {
   check,
   timestamp,
   varchar,
+  uuid,
 } from "drizzle-orm/pg-core";
 
 export const order_status = pgEnum("order_status", [
@@ -34,6 +35,13 @@ export const payment_arrangement = pgEnum("payment_arrangement", [
   "PAY_ON_DELIVERY",
   "NET_30",
 ]);
+
+export const order_groups = pgTable("order_groups", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  group_number: varchar("group_number", { length: 32 }).notNull().unique(),
+  customer_id: integer("customer_id").notNull().references(() => customers.id, { onDelete: "restrict" }),
+  created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
+});
 
 export const orders = pgTable("orders", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
@@ -57,6 +65,8 @@ export const orders = pgTable("orders", {
   payment_arrangement: payment_arrangement("payment_arrangement").default(
     "NET_30",
   ),
+  order_group_id: uuid("order_group_id").references(() => order_groups.id, { onDelete: "restrict" }),
+  order_group_position: integer("order_group_position"),
   notes: text("notes"),
   stock_reserved: boolean("stock_reserved").notNull().default(false),
   status: order_status("status").notNull().default("PENDING"),
@@ -72,7 +82,10 @@ export const orders = pgTable("orders", {
 
   created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
   updated_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  index("orders_group_index").on(table.order_group_id),
+  unique("orders_group_position_unique").on(table.order_group_id, table.order_group_position),
+]);
 
 export const order_items = pgTable(
   "order_items",

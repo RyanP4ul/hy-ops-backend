@@ -1,5 +1,6 @@
 import { Elysia, t } from "elysia";
 import { AutomationService } from "./service";
+import { BackupService } from "./backup-service";
 
 const automationFields = {
   name: t.String({ minLength: 1, maxLength: 100 }),
@@ -16,6 +17,18 @@ const automationFields = {
 };
 
 export const automationRoutes = new Elysia({ prefix: "/automations" })
+  .get("/backup-schedule", () => BackupService.get())
+  .put("/backup-schedule", ({ body }) => BackupService.save(body), {
+    body: t.Object({
+      enabled: t.Boolean(),
+      daily_time: t.String({ pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }),
+      updated_at: t.String({ format: "date-time" }),
+    }),
+  })
+  .post("/backup-schedule/run", async () => {
+    await BackupService.run(true);
+    return { message: "Backup requested. Check GitHub Actions for progress and completion." };
+  })
   .get("/", () => AutomationService.list())
   .post("/", ({ body }) => AutomationService.create(body), {
     body: t.Object(automationFields),

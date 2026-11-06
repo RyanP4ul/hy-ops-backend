@@ -7,6 +7,8 @@ import {
 } from "@/db/schema/automation";
 import { taskManager } from "../../manager/task-manager";
 import { configureAutomationTask } from "../../manager/automation-tasks";
+import { BACKUP_NAME } from "./backup-workflow";
+import { WorkflowError } from "../../utils/workflow-error";
 
 const runtimeTaskNames: Record<string, string> = {
   "Low Stock Checker": "low_stock_checker",
@@ -27,6 +29,7 @@ export abstract class AutomationService {
   }
 
   static async create(data: AutomationInsert) {
+    if (data.name === BACKUP_NAME) throw new WorkflowError("Use the GitHub backup schedule controls to manage this task.", 400);
     const [automation] = await db
       .insert(automations)
       .values({
@@ -41,6 +44,8 @@ export abstract class AutomationService {
   }
 
   static async update(id: number, data: Partial<AutomationInsert>) {
+    const existing = await db.query.automations.findFirst({ where: eq(automations.id, id) });
+    if (existing?.name === BACKUP_NAME || data.name === BACKUP_NAME) throw new WorkflowError("Use the GitHub backup schedule controls to manage this task.", 400);
     const [automation] = await db
       .update(automations)
       .set({ ...data, updated_at: new Date() })

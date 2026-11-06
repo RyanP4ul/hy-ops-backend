@@ -36,7 +36,7 @@ export function mayAccess(role: string, method: string, pathname: string): boole
   const path = pathname.replace(/\/+$/, "") || "/";
   if (role === "admin") return true;
   if (!["staff", "driver", "customer"].includes(role)) return false;
-  if (path === "/ws" || (method === "GET" && path === "/notifications") || (method === "POST" && path === "/notifications/mark-all-read")) return true;
+  if (path === "/ws" || (method === "GET" && path === "/notifications") || (method === "POST" && (path === "/notifications/mark-all-read" || /^\/notifications\/\d+\/read$/.test(path)))) return true;
   if (role === "driver") return (method === "POST" && /^\/driver\/returns\/\d+\/collected$/.test(path)) || (method === "POST" && /^\/driver\/trips\/\d+\/start$/.test(path)) ||     ((method === "GET" || method === "POST") && /^\/driver\/stops\/\d+\/proofs$/.test(path)) ||
     (method === "GET" && /^\/driver\/stops\/\d+\/proofs\/[0-9a-f-]{36}$/i.test(path)) || (method === "GET" && /^\/driver\/(profile|settings|trips(?:\/\d+)?|history)$/.test(path)) || (method === "POST" && /^\/driver\/stops\/\d+\/(delivered|failed)$/.test(path));
   if (role !== "staff") return false;

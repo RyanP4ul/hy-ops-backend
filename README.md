@@ -114,6 +114,25 @@ Both commands create disposable loopback databases.
 
 ## HTTP routes
 
+### Realtime mobile delivery assignments
+
+Run the normal `bun run db:migrate` deployment step to apply
+`src/db/migrations/0004_driver_assignment_events.sql`. This installs an idempotent
+assignment trigger in the production migration history, including installations
+that already used the legacy `_migrations/0007_driver_history_proofs.sql` trigger.
+After a delivery transaction commits, PostgreSQL notifies the backend, which
+sends `DRIVER_ASSIGNMENT_CHANGED` only to that driver's authenticated devices.
+Creation and reassignment use `kind: assigned`; previous owners receive
+`removed`, and cancellation or schedule edits receive their corresponding event.
+Rolled-back schedules send no event. Use a direct/session PostgreSQL connection
+that supports `LISTEN/NOTIFY` for the backend listener.
+
+The mobile app immediately reconciles its current deliveries, shows an in-app
+banner, and reconciles again after reconnect/resume. These are foreground app
+notifications, not operating-system push notifications for a closed app.
+Verify with `powershell -File scripts/test-database.ps1 -Suite Realtime`; it uses
+a disposable local PostgreSQL database and real authenticated WebSockets.
+
 All routes below, except the authentication routes, are protected by the
 access-token guard.
 

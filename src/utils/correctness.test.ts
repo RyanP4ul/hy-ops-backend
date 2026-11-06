@@ -22,6 +22,7 @@ test("overdue schedules and calendar days use Manila", () => {
 test("audit targets identify subresource owners and redact nested credentials", () => {
   expect(auditTarget("/users/12/password")).toEqual({ entityType: "users", entityId: "12" });
   expect(auditTarget("/users/12/archive")).toEqual({ entityType: "users", entityId: "12" });
+  expect(auditTarget("/orders/customers/7/addresses")).toEqual({ entityType: "customers", entityId: "7" });
   expect(redactAuditPayload({ password: "secret", profile: { access_token: "token", name: "Operator" } }))
     .toEqual({ password: "[REDACTED]", profile: { access_token: "[REDACTED]", name: "Operator" } });
 });

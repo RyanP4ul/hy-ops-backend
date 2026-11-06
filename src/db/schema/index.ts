@@ -9,6 +9,7 @@ export * from "./notification";
 export * from "./audit_logs";
 export * from "./order";
 export * from "./payment";
+export * from "./payment-group";
 export * from "./products";
 export * from "./settings";
 export * from "./users";

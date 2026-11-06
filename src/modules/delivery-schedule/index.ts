@@ -14,7 +14,7 @@ export const deliveryScheduleRoutes = new Elysia({
     const search = query.search ? query.search.trim() : "";
     const date = query.date ? new Date(query.date) : null;
 
-    const result = await OrderService.getAllReadyForDeliveryOrders(
+    const result = await OrderService.getSchedulingEntries(
       page,
       limit,
       search,

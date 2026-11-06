@@ -1,3 +1,4 @@
+import { getOrderCombinedPayment } from "../payments/groups";
 import { CustomerReturnService } from "../deliveries/customer-returns";
 import { queueDeliveryNotifications } from "../deliveries/notification-queue";
 import { customer_returns } from "../../db/schema/customer-returns";
@@ -9,6 +10,7 @@ import {
   deliveries,
   deliveries_stops,
   driver_stop_outcomes,
+  driver_stop_proofs,
   drivers,
   inventory,
   order_items,
@@ -160,10 +162,13 @@ export class DriverService {
           .select()
           .from(driver_stop_outcomes)
           .where(eq(driver_stop_outcomes.stop_id, stop.id));
+        const combined = await getOrderCombinedPayment(order.id, tx);
         result.push({
           id: stop.id,
           orderId: order.id,
           orderNumber: order.order_number,
+          combinedPaymentNumber: combined?.payment_number ?? null,
+          combinedPaymentAllocation: combined?.allocated_amount ?? null,
           customer: customerName,
           contact: order.shipping_recipient ?? customerName,
           phone: order.shipping_phone,
@@ -322,6 +327,15 @@ export class DriverService {
           throw new WorkflowError(
             "Stop outcome already changed. Refresh the trip.",
           );
+        if (outcome === "delivered") {
+          const [proof] = await tx
+            .select({ id: driver_stop_proofs.id })
+            .from(driver_stop_proofs)
+            .where(eq(driver_stop_proofs.stop_id, stopId))
+            .limit(1);
+          if (!proof)
+            throw new WorkflowError("Submit Proof of Delivery before confirming delivery.");
+        }
         const [keyUsed] = await tx
           .select({ id: driver_stop_outcomes.stop_id })
           .from(driver_stop_outcomes)

@@ -2,10 +2,12 @@
 name: Supabase Database Backup
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
-
+  # The HyOps backup scheduler dispatches this workflow at the saved time.
   workflow_dispatch:
+
+concurrency:
+  group: supabase-database-backup
+  cancel-in-progress: false
 
 permissions:
   contents: read

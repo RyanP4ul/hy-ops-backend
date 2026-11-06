@@ -15,5 +15,8 @@ export function redactAuditPayload(value: unknown): unknown {
 export function auditTarget(path: string) {
   const parts = path.split("/").filter(Boolean);
   if (parts[0] === "api") parts.shift();
+  if (parts[0] === "orders" && parts[1] === "customers" && /^\d+$/.test(parts[2] ?? "") && parts[3] === "addresses") {
+    return { entityType: "customers", entityId: parts[2] };
+  }
   return { entityType: parts[0] ?? "unknown", entityId: parts[1] && /^\d+$/.test(parts[1]) ? parts[1] : "unknown" };
 }

@@ -1,4 +1,10 @@
 // Only call after the disposable loopback test URL has been validated.
+export async function seedStopProof(sql: any, stopId: number, actorId = 3) {
+    const id = crypto.randomUUID();
+    await sql`insert into driver_stop_proofs(id,stop_id,actor_id,operation_key,kind,storage_key,content_type,sha256,byte_size)
+      values(${id},${stopId},${actorId},${crypto.randomUUID()},'photo',${`fixture/${id}`},'image/webp','fixture',1)`;
+}
+
 export async function seedDriverFixture(sql: any) {
     await sql`truncate users, warehouses, products, inventory, settings restart identity cascade`;
     const hash = await Bun.password.hash("fixture-password", { algorithm: "bcrypt", cost: 4 });
