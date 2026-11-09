@@ -4,6 +4,7 @@ export const orderSchema = t.Object({
   warehouse_id: t.Numeric({ minimum: 1 }),
   customer_id: t.Numeric({ minimum: 1 }),
   notes: t.Optional(t.String()),
+  delivery_type: t.Optional(t.Union([t.Literal("INTERNAL"), t.Literal("LALAMOVE"), t.Literal("PICKUP")])),
   payment_type: t.Optional(t.String({ minLength: 1, maxLength: 100, pattern: "\\S" })),
   payment_method: t.Union([
     t.Literal("BANK_TRANSFER"),

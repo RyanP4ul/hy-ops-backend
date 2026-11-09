@@ -28,6 +28,7 @@ export class ProofService {
     const [row] = await db.select({ run: deliveries }).from(deliveries_stops).innerJoin(deliveries, eq(deliveries.id, deliveries_stops.delivery_id)).where(eq(deliveries_stops.id, stopId));
     if (!row) throw new WorkflowError("Assignment not found.", 404);
     if (actor.role === "driver") {
+      if (row.run.delivery_type === "LALAMOVE") throw new WorkflowError("Assignment not found.", 404);
       if (row.run.driver_id !== Number(actor.sub)) throw new WorkflowError("Assignment not found.", 404);
     } else await assertDeliveryScope(db, row.run.id, await staffWarehouse(actor));
     return row.run;

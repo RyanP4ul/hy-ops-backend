@@ -7,9 +7,15 @@
     "build:dist": "bun build --minify --target=bun --outdir=dist src/index.ts",
     "start:dev": "NODE_ENV=development bun run dist/index.js",
     "start": "NODE_ENV=production bun run dist/index.js",
-    "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate",
-    "db:push": "drizzle-kit push",
+	
+    "db:generate": "bun --env-file=.env.development drizzle-kit generate",
+    "db:migrate": "bun --env-file=.env.development drizzle-kit migrate",
+    "db:push": "bun --env-file=.env.development drizzle-kit push",
+	
+    "production:db:generate": "bun --env-file=.env.production drizzle-kit generate",
+    "production:db:migrate": "bun --env-file=.env.production drizzle-kit migrate",
+    "production:db:push": "bun --env-file=.env.production drizzle-kit push",
+	
     "db:studio": "drizzle-kit studio",
     "db:drop": "drizzle-kit drop",
     "db:seed": "bun run src/db/seeds",

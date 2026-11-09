@@ -69,6 +69,18 @@ export async function queueDeliveryNotifications(
     });
 }
 
+/** External completion uses the same outbox, without inventing an internal stop. */
+export async function queueExternalDeliveryNotification(tx: Transaction, bookingId: number, orderId: number) {
+  const [contact] = await tx.select({ email: users.email, phone: orders.shipping_phone }).from(orders)
+    .innerJoin(customers, eq(customers.id, orders.customer_id)).innerJoin(users, eq(users.id, customers.user_id)).where(eq(orders.id, orderId));
+  for (const channel of ["sms", "email"] as const) {
+    const recipient = channel === "sms" ? contact?.phone?.trim() : contact?.email?.trim();
+    await tx.insert(delivery_notifications).values({ booking_id: bookingId, event_key: "delivered", event_type: "delivered", channel,
+      recipient: recipient || null, status: recipient ? "pending" : "skipped", error: recipient ? null : "Customer contact is unavailable." })
+      .onConflictDoNothing({ target: [delivery_notifications.booking_id, delivery_notifications.event_key, delivery_notifications.channel] });
+  }
+}
+
 export async function queueDeliveryEventNotifications(tx: Transaction, deliveryId: number, event: DeliveryNotificationEvent) {
   const stops = await tx.select({ id: deliveries_stops.id, orderId: deliveries_stops.order_id })
     .from(deliveries_stops).where(eq(deliveries_stops.delivery_id, deliveryId));

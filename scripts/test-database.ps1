@@ -1,6 +1,13 @@
-param([ValidateSet('Database', 'Driver', 'Live', 'Mobile', 'Backup', 'Realtime')][string]$Suite = 'Database', [ValidateSet('All', 'Selected', 'DashboardReports', 'Orders', 'Deliveries', 'UIUX', 'Operations', 'Authorization', 'Driver')][string]$BrowserScope = 'All', [string]$BrowserFilter = '')
+param([ValidateSet('Database', 'Driver', 'Live', 'Mobile', 'Backup', 'Realtime', 'Lalamove')][string]$Suite = 'Database', [ValidateSet('All', 'Selected', 'DashboardReports', 'Orders', 'Deliveries', 'UIUX', 'Operations', 'Authorization', 'Driver')][string]$BrowserScope = 'All', [string]$BrowserFilter = '')
 $ErrorActionPreference = 'Stop'
 $backendRoot = Split-Path -Parent $PSScriptRoot
+function Get-FixtureMigration([string]$Name) {
+  foreach ($directory in @('migrations', '__migrations', '_migrations')) {
+    $candidate = Join-Path $backendRoot "src/db/$directory/$Name"
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+  }
+  throw "Fixture migration not found: $Name"
+}
 $pgBin = Split-Path -Parent (Get-Command psql.exe -ErrorAction Stop).Source
 $fixtureBase = Join-Path (Split-Path -Parent $backendRoot) '.local-test-pg'
 New-Item -ItemType Directory -Force -Path $fixtureBase | Out-Null
@@ -39,6 +46,8 @@ DROP TABLE payment_group_allocations;
 DROP TABLE payment_groups;
 ALTER TABLE orders DROP COLUMN order_group_id, DROP COLUMN order_group_position;
 DROP TABLE order_groups;
+ALTER TABLE orders DROP COLUMN lalamove_pickup_warehouse_id;
+ALTER TABLE warehouses DROP COLUMN phone_number;
 DROP TABLE customer_returns;
 DROP TABLE driver_stop_proofs;
 DROP TABLE driver_stop_outcomes;
@@ -59,17 +68,22 @@ ALTER TABLE orders ADD CONSTRAINT orders_warehouse_id_users_id_fk FOREIGN KEY (w
   & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f $legacyPath
   if ($LASTEXITCODE -ne 0) { throw 'Legacy fixture column setup failed.' }
   foreach ($migration in @('0000_nullable_payment_received_at.sql', '0001_order_item_price_snapshots.sql', '0002_order_stock_reservations.sql', '0003_destinations_stock_history_refunds.sql', '0004_gps_and_receipt_events.sql', '0006_driver_stop_outcomes.sql', '0007_driver_history_proofs.sql', '0008_customer_return_pickups.sql')) {
-    & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Join-Path $backendRoot "src/db/_migrations/$migration")
+    & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Get-FixtureMigration $migration)
     if ($LASTEXITCODE -ne 0) { throw "Fixture migration failed: $migration" }
   }
-  & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Join-Path $backendRoot 'src/db/migrations/0004_driver_assignment_events.sql')
+  & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Get-FixtureMigration '0004_driver_assignment_events.sql')
   if ($LASTEXITCODE -ne 0) { throw 'Driver assignment trigger migration failed.' }
-  & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Join-Path $backendRoot 'src/db/migrations/0005_payment_groups.sql')
+  & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Get-FixtureMigration '0005_payment_groups.sql')
   if ($LASTEXITCODE -ne 0) { throw 'Combined payment migration failed.' }
-  & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Join-Path $backendRoot 'src/db/migrations/0006_order_groups.sql')
+  & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Get-FixtureMigration '0006_order_groups.sql')
   if ($LASTEXITCODE -ne 0) { throw 'Order group migration failed.' }
+  & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Get-FixtureMigration '0007_lalamove_order_integration.sql')
+  if ($LASTEXITCODE -ne 0) { throw 'Lalamove migration failed.' }
+  & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Get-FixtureMigration '0001_cuddly_chronomancer.sql')
+  if ($LASTEXITCODE -ne 0) { throw 'Warehouse pickup migration failed.' }
   $env:HYOPS_TEST_DATABASE_URL = "postgres://hyops_test@127.0.0.1:$fixturePort/hyops_test"
   if ($Suite -eq 'Realtime') { & bun test --timeout 30000 ./tests/driver-socket.test.ts }
+  elseif ($Suite -eq 'Lalamove') { & bun test --timeout 30000 ./tests/lalamove.test.ts }
   elseif ($Suite -eq 'Backup') { & bun test --timeout 30000 ./tests/backup-schedule.test.ts }
   elseif ($Suite -eq 'Mobile') { & bun run ./tests/mobile/runner.ts }
   elseif ($Suite -eq 'Live') { & bun run ./tests/live/runner.ts $BrowserScope $BrowserFilter }
@@ -85,6 +99,8 @@ ALTER TABLE orders ADD CONSTRAINT orders_warehouse_id_users_id_fk FOREIGN KEY (w
     & bun test --timeout 30000 ./tests/driver-socket.test.ts
   }
   else {
+    & bun test --timeout 30000 ./tests/lalamove.test.ts
+    if ($LASTEXITCODE -ne 0) { throw 'Lalamove integration tests failed.' }
     & bun test --timeout 30000 ./tests/transactions.test.ts
     if ($LASTEXITCODE -ne 0) { throw 'Existing transaction tests failed.' }
     & bun test --timeout 30000 ./tests/driver.test.ts

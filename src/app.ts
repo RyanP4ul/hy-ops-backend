@@ -32,6 +32,8 @@ import { archivesRoutes } from "./modules/archives";
 import { startAutomationTasks } from "./manager/automation-tasks";
 import { vehicleRoutes } from "./modules/vehicles";
 import { lalamoveRoutes } from "./modules/lalamove";
+import { lalamoveWebhookRoutes } from "./modules/lalamove/webhook";
+import { startLalamoveWorker } from "./modules/lalamove/reconciliation-worker";
 import { orderRoutes } from "./modules/order";
 import { deliveryScheduleRoutes } from "./modules/delivery-schedule";
 import { deliveriesRoutes } from "./modules/deliveries";
@@ -61,6 +63,7 @@ export function createApp(
   let driverEvents: Awaited<ReturnType<typeof startDriverEvents>> | undefined;
   let deliveryNotifications: ReturnType<typeof startDeliveryNotificationWorker> | undefined;
   let backupScheduler: Awaited<ReturnType<typeof startBackupScheduler>> | undefined;
+  let lalamoveWorker: ReturnType<typeof startLalamoveWorker> | undefined;
   return (
     new Elysia()
       .onStart(async (app) => {
@@ -71,6 +74,7 @@ export function createApp(
 
         driverEvents = await startDriverEvents(process.env.DATABASE_URL as string);
         if (options.externalIntegrations !== false) deliveryNotifications = startDeliveryNotificationWorker(options.sms, options.emailSender);
+        if (options.externalIntegrations !== false) lalamoveWorker = startLalamoveWorker();
         if (options.automation !== false) {
           await startAutomationTasks();
           if (options.externalIntegrations !== false) backupScheduler = await startBackupScheduler();
@@ -80,6 +84,7 @@ export function createApp(
       })
       .onStop(async () => {
         backupScheduler?.stop();
+        await lalamoveWorker?.stop();
         await deliveryNotifications?.stop();
         await driverEvents?.stop();
         await events?.stop();
@@ -167,6 +172,7 @@ export function createApp(
         }
       })
       .use(authRoutes)
+      .use(options.externalIntegrations === false ? new Elysia() : lalamoveWebhookRoutes)
       .onBeforeHandle(({ request, set }) => {
         if (
           options.externalIntegrations === false &&

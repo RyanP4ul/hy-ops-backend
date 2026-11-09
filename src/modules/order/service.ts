@@ -4,6 +4,7 @@ import type { CreateOrderInput, OrderBatchInput } from "./model";
 import { allocatePayment } from "../../utils/payment-allocation";
 import { coordinates } from "../../utils/coordinates";
 import { changeOrderStock } from "./stock";
+import { assertNoExternalClaim } from "../lalamove/fulfillment";
 import { db } from "@/db/index";
 import {
   customer_addresses,
@@ -46,6 +47,10 @@ const orderGroupFields = {
   order_group_number: sql<string | null>`(select group_number from order_groups where id = ${orders.order_group_id})`,
   order_group_size: sql<number>`(select count(*)::int from orders as members where members.order_group_id = ${orders.order_group_id})`.mapWith(Number),
 };
+const internalSchedulingEligible = sql`coalesce(${orders.delivery_method}, '') <> 'LALAMOVE'
+  and not exists (select 1 from delivery_orders b where b.order_id = ${orders.id} and b.active)
+  and not exists (select 1 from orders m where m.order_group_id = ${orders.order_group_id}
+    and (m.delivery_method = 'LALAMOVE' or exists (select 1 from delivery_orders b where b.order_id = m.id and b.active)))`;
 
 type SortField = "id" | "product_number" | "warehouse_name" | "customer_name" | "item_count" | "total";
 type SortOrder = "asc" | "desc";
@@ -169,6 +174,8 @@ export abstract class OrderService {
         customer_company: customers.company_name,
         shipping_address: orders.shipping_address,
         status: orders.status,
+        delivery_type: sql<string>`coalesce(${orders.delivery_method}, (select ${deliveries.delivery_type}::text from ${deliveries_stops} inner join ${deliveries} on ${deliveries.id} = ${deliveries_stops.delivery_id} where ${deliveries_stops.order_id} = ${orders.id} order by ${deliveries.id} desc limit 1))`,
+        lalamove_booking: sql<{ id: number; status: string; booking_state: string; active: boolean } | null>`(select json_build_object('id', b.id, 'status', b.status, 'booking_state', b.booking_state, 'active', b.active) from delivery_orders b where b.order_id = ${orders.id} order by b.id desc limit 1)`,
         version: orders.version,
       })
       .from(orders)
@@ -214,7 +221,7 @@ export abstract class OrderService {
 
     const statuses = ["PENDING", "PROCESSING", "SCHEDULING", "SCHEDULED", "IN_TRANSIT", "COMPLETED", "CANCELLED"] as const;
     const validStatus = statuses.find((value) => value === status);
-    const latestDeliveryType = sql<string>`(select ${deliveries.delivery_type} from ${deliveries_stops} inner join ${deliveries} on ${deliveries.id} = ${deliveries_stops.delivery_id} where ${deliveries_stops.order_id} = ${orders.id} order by ${deliveries.id} desc limit 1)`;
+    const latestDeliveryType = sql<string>`coalesce(${orders.delivery_method}, (select ${deliveries.delivery_type}::text from ${deliveries_stops} inner join ${deliveries} on ${deliveries.id} = ${deliveries_stops.delivery_id} where ${deliveries_stops.order_id} = ${orders.id} order by ${deliveries.id} desc limit 1))`;
     const whereQuery = and(or(ilike(users.name, `%${search}%`), ilike(orders.order_number, `%${search}%`), ilike(orderGroupFields.order_group_number, `%${search}%`), ilike(customers.company_name, `%${search}%`), ilike(orders.shipping_address, `%${search}%`)), validStatus ? eq(orders.status, validStatus) : undefined,
       ["INTERNAL", "LALAMOVE", "PICKUP"].includes(delivery_type) ? sql`${latestDeliveryType} = ${delivery_type}` : undefined);
 
@@ -232,6 +239,7 @@ export abstract class OrderService {
         ...orderGroupFields,
         warehouse_id: orders.warehouse_id,
         warehouse_name: warehouses.name,
+        delivery_type: latestDeliveryType,
         customer_name: users.name,
         email: users.email,
         customer_company: customers.company_name,
@@ -303,7 +311,7 @@ export abstract class OrderService {
         shipping_latitude: orders.shipping_latitude,
         shipping_longitude: orders.shipping_longitude,
         customer_address_id: orders.shipping_address_source_id,
-        delivery_type: sql<string | null>`(select ${deliveries.delivery_type} from ${deliveries_stops} inner join ${deliveries} on ${deliveries.id} = ${deliveries_stops.delivery_id} where ${deliveries_stops.order_id} = ${orders.id} order by ${deliveries.id} desc limit 1)`,
+        delivery_type: sql<string | null>`coalesce(${orders.delivery_method}, (select ${deliveries.delivery_type}::text from ${deliveries_stops} inner join ${deliveries} on ${deliveries.id} = ${deliveries_stops.delivery_id} where ${deliveries_stops.order_id} = ${orders.id} order by ${deliveries.id} desc limit 1))`,
         payment_method: sql<string | null>`(select ${payments.payment_method} from ${payments} where ${payments.order_id} = ${orders.id} order by ${payments.id} limit 1)`,
         payment_type: sql<string | null>`(select ${payments.payment_type} from ${payments} where ${payments.order_id} = ${orders.id} order by ${payments.id} limit 1)`,
         amount_paid: sql<number>`coalesce((select sum(${payments.amount}) from ${payments} where ${payments.order_id} = ${orders.id}), 0)`.mapWith(Number),
@@ -562,6 +570,7 @@ export abstract class OrderService {
         payment_arrangement: data.payment_arrangement,
         notes: data.notes || "",
         shipping_recipient: customer_recipient,
+        delivery_method: data.delivery_type ?? null,
         shipping_phone: customer_phone,
         shipping_address: customer_address,
         shipping_latitude: destination?.latitude ?? null,
@@ -778,6 +787,7 @@ export abstract class OrderService {
         throw new WorkflowError("Only pending and processing orders can be cancelled");
       }
 
+      await assertNoExternalClaim(tx, orderId);
       if (order.stock_reserved) await changeOrderStock(tx, orderId, order.warehouse_id, "release");
 
       await tx
@@ -806,19 +816,22 @@ export abstract class OrderService {
       const [order] = await tx.select().from(orders).where(eq(orders.id, orderId)).for("update");
       if (!order || order.version !== version) throw new WorkflowError("Order changed. Refresh and try again.");
       if (!["PENDING", "PROCESSING", "SCHEDULING"].includes(order.status)) throw new WorkflowError("Destination can only be confirmed before scheduling.");
+      await assertNoExternalClaim(tx, orderId);
       await tx.update(orders).set({ shipping_latitude: point.latitude, shipping_longitude: point.longitude, version: order.version + 1, updated_at: new Date() }).where(eq(orders.id, orderId));
       return { message: "Destination coordinates saved.", id: orderId };
     });
   }
 
   static async getReadyOrderGroup(groupId: string, warehouseId: number) {
-    const members = await db.select({ id: orders.id, warehouse_id: orders.warehouse_id, status: orders.status, ...orderGroupFields,
+    const members = await db.select({ id: orders.id, warehouse_id: orders.warehouse_id, status: orders.status, delivery_method: orders.delivery_method, ...orderGroupFields,
       order_number: orders.order_number, shipping_address: orders.shipping_address,
       shipping_latitude: orders.shipping_latitude, shipping_longitude: orders.shipping_longitude,
     }).from(orders).where(eq(orders.order_group_id, groupId)).orderBy(asc(orders.order_group_position));
     if (!members.some(row => row.warehouse_id === warehouseId)) throw new WorkflowError("Order group not found in this warehouse.", 404);
     if (members.some(row => row.warehouse_id !== warehouseId)) throw new WorkflowError("All orders in this group must belong to the selected warehouse.");
     if (members.some(row => row.status !== "SCHEDULING")) throw new WorkflowError("All orders in this group must have Scheduling status before the group can be scheduled.");
+    if (members.some(row => row.delivery_method === "LALAMOVE")) throw new WorkflowError("This group includes Lalamove orders. Book each external order separately.");
+    for (const member of members) await assertNoExternalClaim(db, member.id);
     return { rows: members, total_members: members.length, group_number: members[0]!.order_group_number };
   }
 
@@ -827,7 +840,7 @@ export abstract class OrderService {
     limit = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 100) : 10;
     const key = sql<string>`coalesce(${orders.order_group_id}::text, 'order-' || ${orders.id}::text)`;
     const match = `%${search.trim()}%`;
-    const predicate = and(eq(orders.status, "SCHEDULING"),
+    const predicate = and(eq(orders.status, "SCHEDULING"), internalSchedulingEligible,
       warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId),
       search.trim() ? or(ilike(users.name, match), ilike(customers.company_name, match),
         ilike(orders.order_number, match), ilike(orders.shipping_address, match), ilike(orderGroupFields.order_group_number, match),
@@ -882,7 +895,7 @@ export abstract class OrderService {
       .from(orders)
       .leftJoin(customers, eq(orders.customer_id, customers.id))
       .leftJoin(users, eq(customers.user_id, users.id))
-      .where(and(whereQuery, eq(orders.status, "SCHEDULING"), warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId)));
+      .where(and(whereQuery, eq(orders.status, "SCHEDULING"), internalSchedulingEligible, warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId)));
 
     const rows = await db
       .select({
@@ -906,7 +919,7 @@ export abstract class OrderService {
       .from(orders)
       .leftJoin(customers, eq(orders.customer_id, customers.id))
       .leftJoin(users, eq(customers.user_id, users.id))
-      .where(and(whereQuery, eq(orders.status, "SCHEDULING"), warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId)))
+      .where(and(whereQuery, eq(orders.status, "SCHEDULING"), internalSchedulingEligible, warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId)))
       .orderBy(desc(orders.id))
       .offset(offset)
       .limit(limit);
@@ -922,6 +935,7 @@ export abstract class OrderService {
   ) {
     const predicate = and(
       eq(orders.status, "SCHEDULING"),
+      internalSchedulingEligible,
       warehouse_id > 0 ? eq(orders.warehouse_id, warehouse_id) : undefined,
       search.trim() ? or(ilike(users.name, `%${search.trim()}%`), ilike(orders.order_number, `%${search.trim()}%`), ilike(orderGroupFields.order_group_number, `%${search.trim()}%`)) : undefined,
     );

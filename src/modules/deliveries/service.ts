@@ -10,6 +10,7 @@ import { WorkflowError } from "../../utils/workflow-error";
 import { stockTransaction } from "../inventory/transaction";
 import { coordinates } from "../../utils/coordinates";
 import { changeOrderStock } from "../order/stock";
+import { assertNoExternalClaim } from "../lalamove/fulfillment";
 import { db } from "@/db/index";
 import {
   deliveries,
@@ -182,6 +183,7 @@ export abstract class DeliveryService {
   }
 
   static async createDelivery(data: DeliveryCreateType, warehouseId?: number) {
+    if (data.delivery_type === "LALAMOVE") throw new WorkflowError("Use the Lalamove quotation and confirmation flow. External couriers cannot be assigned to internal drivers.");
     return await db
       .transaction(async (tx) => {
         if (
@@ -199,6 +201,8 @@ export abstract class DeliveryService {
         for (const id of data.order_ids) {
           const order = locked.find(member => member.id === id);
           if (!order || order.status !== "SCHEDULING") throw new WorkflowError("An order is no longer ready for scheduling. Refresh and try again.");
+          if (order.delivery_method === "LALAMOVE") throw new WorkflowError("This order uses Lalamove. Change its delivery method before internal assignment.");
+          await assertNoExternalClaim(tx, id);
           selectedOrders.set(id, order);
         }
         const groups = new Set([...selectedOrders.values()].flatMap(order => order.order_group_id ? [order.order_group_id] : []));
@@ -309,6 +313,7 @@ export abstract class DeliveryService {
             .update(orders)
             .set({
               status: "SCHEDULED",
+              delivery_method: data.delivery_type,
               version: sql`${orders.version} + 1`,
               updated_at: new Date(),
             })
@@ -583,6 +588,7 @@ export abstract class DeliveryService {
         .where(eq(deliveries.id, deliveryId))
         .for("update");
       if (!delivery) throw new WorkflowError("Delivery not found");
+      if (delivery.delivery_type === "LALAMOVE") throw new WorkflowError("External courier jobs cannot be dispatched by an internal driver.");
       await assertDeliveryScope(tx, deliveryId, warehouseId);
       if (driverStart && delivery.driver_id !== driverStart.driverId)
         throw new WorkflowError("Assignment not found.", 404);

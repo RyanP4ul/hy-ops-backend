@@ -15,6 +15,8 @@ import {
   deliveries_stops,
   users,
   vehicles,
+  delivery_orders,
+  orders,
 } from "@/db/schema";
 import type {
   DeliveryStatus,
@@ -26,6 +28,27 @@ import type {
 import type { DeliveryView, Range } from "../domain/types";
 import { rangeDays } from "../domain/filters";
 import { db } from "@/db/index";
+import { deliveryMatches } from "../domain/filters";
+import { manilaDay } from "../../../utils/time";
+
+/** External bookings are report projections only; negative IDs cannot collide with fleet runs. */
+export async function findExternalDeliveries(f?: Filters, range?: Range, orderIds?: () => SQLWrapper) {
+  const rows = await db.select({ booking: delivery_orders, warehouseId: orders.warehouse_id }).from(delivery_orders)
+    .innerJoin(orders, eq(orders.id, delivery_orders.order_id)).where(and(
+      eq(delivery_orders.environment, "production"),
+      inArray(delivery_orders.booking_state, ["CONFIRMED", "REVIEW", "UNKNOWN"]),
+      orderIds ? inArray(orders.id, orderIds()) : undefined,
+      range ? and(gte(delivery_orders.created_at, Math.floor(range.start / 1000)), lt(delivery_orders.created_at, Math.floor(range.end / 1000))) : undefined,
+      f?.warehouses.length ? inArray(orders.warehouse_id, f.warehouses.map(Number)) : undefined,
+    )).orderBy(desc(delivery_orders.id));
+  return rows.filter(row => row.booking.lalamove_order_id).map(({ booking: b, warehouseId }) => {
+    const view: DeliveryView = { id: -b.id, date: manilaDay(b.created_at * 1000), departureAt: b.picked_up_at?.getTime() ?? b.created_at * 1000,
+      type: "LALAMOVE", status: b.completed_at ? "completed" : b.picked_up_at ? "in_transit" : ["CANCELED", "REJECTED", "EXPIRED"].includes(b.status) ? "cancelled" : "scheduled",
+      vehicle: "Lalamove (external)", driver: (b.driver_details as { name?: string } | null)?.name ?? "Lalamove courier", warehouseId,
+      cost: b.currency === "PHP" && b.delivery_fee !== null ? Number(b.delivery_fee) : 0, costStatus: b.completed_at ? "approved" : "pending" };
+    return { orderId: b.order_id!, completedAt: b.completed_at?.getTime() ?? null, view };
+  }).filter(row => !f || deliveryMatches(row.view, f));
+}
 
 /**
  * WHERE for the deliveries table (joined with vehicles).
@@ -206,6 +229,10 @@ export async function findLatestDeliveryByOrder(
   for (const l of latest) {
     const d = byId.get(l.deliveryId);
     if (d) out.set(l.orderId, d);
+  }
+  for (const row of await findExternalDeliveries(undefined, undefined, orderIds)) {
+    // Query is newest-first. A sales order has one fulfillment summary even after rebooking.
+    if (!out.has(row.orderId) || out.get(row.orderId)!.type !== "LALAMOVE") out.set(row.orderId, row.view);
   }
   return out;
 }

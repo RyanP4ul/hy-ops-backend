@@ -1,6 +1,6 @@
 // Loads the rows each report is built from. One function per date basis, each returning rows that already
 // satisfy every active filter. `back = 1` loads the equal-length period before (for "vs previous period").
-import { inArray } from "drizzle-orm";
+import { inArray, or } from "drizzle-orm";
 import type { Filters } from "../reports.contract";
 import type {
   EventView,
@@ -18,6 +18,7 @@ import {
   findEvents,
   findStops,
   stopOrderIds,
+  findExternalDeliveries,
 } from "../repositories/deliveries.repository";
 import { findInventory } from "../repositories/inventory.repository";
 import { orders } from "@/db/schema";
@@ -72,11 +73,12 @@ export async function stopsFor(
   back = 0,
 ): Promise<StopView[]> {
   const where = deliveryWhere(f, { range: rangeOf(f, now, back) });
+  const external = await findExternalDeliveries(f, rangeOf(f, now, back));
   const [stops, deliveries, orderRows] = await Promise.all([
     findStops(where),
     findDeliveries(where),
     findOrderViews(
-      orderWhere(f, { extra: inArray(orders.id, stopOrderIds(where)) }),
+      orderWhere(f, { extra: or(inArray(orders.id, stopOrderIds(where)), external.length ? inArray(orders.id, external.map(row => row.orderId)) : undefined) }),
       now,
     ),
   ]);
@@ -84,7 +86,7 @@ export async function stopsFor(
   const orderById = new Map(
     orderRows.filter((o) => orderMatches(o, f, false)).map((o) => [o.id, o]),
   );
-  return stops.flatMap((s) => {
+  const fleetStops: StopView[] = stops.flatMap((s) => {
     const delivery = deliveryById.get(s.deliveryId);
     const order = orderById.get(s.orderId);
     return delivery && order
@@ -99,6 +101,10 @@ export async function stopsFor(
         ]
       : [];
   });
+  return [...fleetStops, ...external.flatMap(row => {
+    const order = orderById.get(row.orderId);
+    return order ? [{ id: row.view.id, status: row.completedAt ? "delivered" as const : "pending" as const, deliveredAt: row.completedAt, delivery: row.view, order }] : [];
+  })];
 }
 
 export async function eventsFor(f: Filters, now: number): Promise<EventView[]> {

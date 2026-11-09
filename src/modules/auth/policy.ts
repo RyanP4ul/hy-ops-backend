@@ -40,6 +40,7 @@ export function mayAccess(role: string, method: string, pathname: string): boole
   if (role === "driver") return (method === "POST" && /^\/driver\/returns\/\d+\/collected$/.test(path)) || (method === "POST" && /^\/driver\/trips\/\d+\/start$/.test(path)) ||     ((method === "GET" || method === "POST") && /^\/driver\/stops\/\d+\/proofs$/.test(path)) ||
     (method === "GET" && /^\/driver\/stops\/\d+\/proofs\/[0-9a-f-]{36}$/i.test(path)) || (method === "GET" && /^\/driver\/(profile|settings|trips(?:\/\d+)?|history)$/.test(path)) || (method === "POST" && /^\/driver\/stops\/\d+\/(delivered|failed)$/.test(path));
   if (role !== "staff") return false;
+  if (path === "/lalamove/webhook/register") return false;
   if (method === "GET" && ["/users/customers", "/users/drivers", "/settings", "/settings/names"].includes(path)) return true;
   if (path.startsWith("/email/")) return method === "POST" && path === "/email/send";
   // Staff scheduling is constrained to the staff warehouse in route/service checks.

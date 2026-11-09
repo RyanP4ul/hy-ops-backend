@@ -4,10 +4,12 @@ import { OrderService } from "./service";
 import { AuthUser } from "../auth/schema";
 import { staffWarehouse, assertOrderScope } from "../deliveries/scope";
 import { WorkflowError } from "../../utils/workflow-error";
+import { LalamoveService } from "../lalamove/service";
 
 export const orderRoutes = new Elysia({ prefix: "/orders" })
   .decorate("user", {} as AuthUser)
   .use(orderModel)
+  .get("/:id/lalamove", ({ params, user }) => LalamoveService.context(params.id, user), { params: t.Object({ id: t.Numeric({ minimum: 1 }) }) })
   .post("/customers/:customerId/addresses", ({ params, body }) =>
     OrderService.saveShippingAddress(params.customerId, body), {
       detail: { summary: 'Create customers by customerId addresses', description: 'POST endpoint for customers by customerId addresses in the orders module.', tags: ['Orders'] },

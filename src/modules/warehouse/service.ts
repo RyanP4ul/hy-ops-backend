@@ -1,7 +1,7 @@
 import { WorkflowError } from "../../utils/workflow-error";
 import { db } from "@/db/index";
 import { warehouses } from "@/db/schema/warehouses";
-import { and, count, desc, asc, eq, ilike } from "drizzle-orm";
+import { and, count, desc, asc, eq, ilike, or } from "drizzle-orm";
 import { logger } from "../../utils/logger";
 import {
   archives,
@@ -25,7 +25,7 @@ export abstract class WarehouseService {
     sort_by: string = "id:desc",
   ) {
     const is_search_empty = search.length === 0;
-    const offset = is_search_empty ? Math.max(page * limit, 0) : 0;
+    const offset = Math.max(page * limit, 0);
     const [sortField, sortOrder] = sort_by.split(":");
 
     const is_archived_query = eq(warehouses.is_archived, false);
@@ -40,6 +40,7 @@ export abstract class WarehouseService {
         .select({
           id: warehouses.id,
           name: warehouses.name,
+          phone_number: warehouses.phone_number,
           street_address: warehouses.street_address,
           city: warehouses.city,
           state: warehouses.state,
@@ -83,7 +84,7 @@ export abstract class WarehouseService {
     search: string = "",
   ) {
     const is_search_empty = search.length === 0;
-    const offset = is_search_empty ? Math.max(page * limit, 0) : 0;
+    const offset = Math.max(page * limit, 0);
     const is_archived_query = eq(warehouses.is_archived, false);
 
     const whereQuery = !is_search_empty
@@ -101,6 +102,7 @@ export abstract class WarehouseService {
       columns: {
         id: true,
         name: true,
+        phone_number: true,
         street_address: true,
         city: true,
         state: true,
@@ -256,6 +258,7 @@ export abstract class WarehouseService {
           id: warehouses.id,
           name: warehouses.name,
           street_address: warehouses.street_address,
+          phone_number: warehouses.phone_number,
           city: warehouses.city,
           state: warehouses.state,
           zip_code: warehouses.zip_code,
@@ -307,7 +310,7 @@ export abstract class WarehouseService {
         tx
           .select({ id: orders.id })
           .from(orders)
-          .where(eq(orders.warehouse_id, id))
+          .where(or(eq(orders.warehouse_id, id), eq(orders.lalamove_pickup_warehouse_id, id)))
           .limit(1),
       ]);
       if (references.some((rows) => rows.length))
@@ -344,7 +347,7 @@ export abstract class WarehouseService {
         .from(orders)
         .where(
           and(
-            eq(orders.warehouse_id, warehouse_id),
+            or(eq(orders.warehouse_id, warehouse_id), eq(orders.lalamove_pickup_warehouse_id, warehouse_id)),
             inArray(orders.status, [
               "PENDING",
               "PROCESSING",

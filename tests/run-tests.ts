@@ -1,4 +1,6 @@
 // Isolate route module mocks from real-service/database tests.
+const lalamoveResult = Bun.spawnSync([process.execPath, "test", "tests/lalamove.test.ts"], { stdout: "inherit", stderr: "inherit" });
+if (lalamoveResult.exitCode !== 0) process.exit(lalamoveResult.exitCode);
 const backupResult = Bun.spawnSync([process.execPath, "test", "tests/backup-schedule.test.ts"], { stdout: "inherit", stderr: "inherit" });
 if (backupResult.exitCode !== 0) process.exit(backupResult.exitCode);
 const paymentTypeResult = Bun.spawnSync([process.execPath, "test", "tests/payment-type.test.ts"], { stdout: "inherit", stderr: "inherit" });

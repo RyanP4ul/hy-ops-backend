@@ -57,6 +57,7 @@ export class DriverService {
   static async trips(actorId: number, page = 0, pageSize = 20, past = false) {
     const predicate = and(
       eq(deliveries.driver_id, actorId),
+      sql`${deliveries.delivery_type} <> 'LALAMOVE'`,
       past
         ? inArray(deliveries.status, ["completed", "cancelled"])
         : inArray(deliveries.status, ["scheduled", "in_transit", "returning"]),
@@ -91,9 +92,10 @@ export class DriverService {
       const [run] = await tx
         .select()
         .from(deliveries)
-        .where(and(eq(deliveries.id, id), eq(deliveries.driver_id, actorId)))
+        .where(and(eq(deliveries.id, id), eq(deliveries.driver_id, actorId), sql`${deliveries.delivery_type} <> 'LALAMOVE'`))
         .for("share");
       assertDriverOwnership(run?.driver_id, actorId);
+      if (run.delivery_type === "LALAMOVE") throw new WorkflowError("External courier jobs are not internal driver assignments.", 403);
       const [vehicle] = await tx
         .select()
         .from(vehicles)
@@ -233,6 +235,7 @@ export class DriverService {
     const predicate = and(
       eq(deliveries.driver_id, actorId),
       sql`(${deliveries_stops.status} <> 'pending' OR ${deliveries.status} = 'cancelled')`,
+      sql`${deliveries.delivery_type} <> 'LALAMOVE'`,
       start ? sql`${time} >= ${start}::timestamptz` : undefined,
       end ? sql`${time} < ${end}::timestamptz` : undefined,
       filter.status ? sql`${status} = ${filter.status}` : undefined,
@@ -301,6 +304,7 @@ export class DriverService {
           .where(eq(deliveries.id, identity.deliveryId))
           .for("update");
         assertDriverOwnership(run?.driver_id, actorId);
+        if (run.delivery_type === "LALAMOVE") throw new WorkflowError("External courier jobs are not internal driver assignments.", 403);
         const [stop] = await tx
           .select()
           .from(deliveries_stops)

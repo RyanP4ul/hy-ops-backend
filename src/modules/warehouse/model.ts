@@ -2,6 +2,7 @@ import Elysia, { Static, t } from "elysia";
 
 export const warehouse_schema = t.Object({
   name: t.String({ minLength: 1, maxLength: 100 }),
+  phone_number: t.Optional(t.Union([t.Null(), t.String({ maxLength: 20, pattern: "^$|^\\+?[0-9 ()-]{7,20}$" })])),
   street_address: t.String({ minLength: 1, maxLength: 255 }),
   city: t.String({ minLength: 1, maxLength: 100 }),
   state: t.String({ minLength: 1, maxLength: 100 }),

@@ -4,6 +4,7 @@ import {
   deliveries_stops,
   delivery_notifications,
   orders,
+  delivery_orders,
 } from "../../db/schema";
 import { gmailSender, type EmailSender } from "../email";
 import { buildEmailMessage } from "../email/message";
@@ -20,7 +21,9 @@ async function sendNotification(
   emailSender: EmailSender,
 ) {
   try {
-    const [delivery] = await db
+    const [delivery] = job.booking_id ? await db.select({ orderId: orders.id, orderNumber: orders.order_number,
+      status: delivery_orders.status }).from(delivery_orders).innerJoin(orders, eq(orders.id, delivery_orders.order_id))
+      .where(eq(delivery_orders.id, job.booking_id)) : await db
       .select({
         orderId: orders.id,
         orderNumber: orders.order_number,
@@ -28,10 +31,10 @@ async function sendNotification(
       })
       .from(deliveries_stops)
       .innerJoin(orders, eq(orders.id, deliveries_stops.order_id))
-      .where(eq(deliveries_stops.id, job.stop_id));
+      .where(eq(deliveries_stops.id, job.stop_id ?? -1));
 
     if (!delivery) throw new Error("Delivery stop is unavailable.");
-    if (job.event_type === "delivered" && delivery.status !== "delivered")
+    if (job.event_type === "delivered" && !["delivered", "COMPLETED"].includes(delivery.status))
       throw new Error("Delivery stop is not delivered.");
 
     if (!job.recipient) throw new Error("Notification recipient is missing.");
