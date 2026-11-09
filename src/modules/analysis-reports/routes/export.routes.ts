@@ -6,7 +6,11 @@ import { buildExport, DEFAULT_LOW_STOCK, getPreview } from "../services/export.s
 export const exportRoutes = new Elysia({ name: "reports.export" })
   .get("/preview", ({ query }) => getPreview(query.type, parseFilters(query), query.threshold ?? DEFAULT_LOW_STOCK), {
     query: PreviewQuery,
-    detail: { tags: ["Reports"], summary: "Summary and row count for the Generate Report dialog" },
+    detail: {
+      tags: ["Reports"],
+      summary: "Preview a report",
+      description: "Retrieve a report summary and row count before downloading it.",
+    },
   })
   .get(
     "/export",
@@ -16,5 +20,12 @@ export const exportRoutes = new Elysia({ name: "reports.export" })
         headers: { "Content-Type": file.mime, "Content-Disposition": `attachment; filename="${file.filename}"`, "Cache-Control": "no-store" },
       });
     },
-    { query: ExportQuery, detail: { tags: ["Reports"], summary: "Download a report as CSV or XLSX" } },
+    {
+      query: ExportQuery,
+      detail: {
+        tags: ["Reports"],
+        summary: "Export a report",
+        description: "Download a report in CSV or XLSX format.",
+      },
+    },
   );

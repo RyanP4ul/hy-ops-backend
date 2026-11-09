@@ -19,7 +19,7 @@ export function createEmailRoutes(sender: EmailSender = gmailSender) { return ne
     });
 
     return redirect(url);
-  })
+  }, { detail: { summary: 'Get oauth start', description: 'GET endpoint for oauth start in the email module.', tags: ['Email'] } })
 
   .get("/oauth/callback", async ({ query, set }) => {
     if (process.env.NODE_ENV === "production") {
@@ -50,7 +50,7 @@ export function createEmailRoutes(sender: EmailSender = gmailSender) { return ne
       message: "Google authorization successful.",
       refreshToken: tokens.refresh_token,
     };
-  })
+  }, { detail: { summary: 'Get oauth callback', description: 'GET endpoint for oauth callback in the email module.', tags: ['Email'] } })
   .get("/test", async () => {
     const response = await gmail.users.getProfile({
       userId: "me",
@@ -60,7 +60,7 @@ export function createEmailRoutes(sender: EmailSender = gmailSender) { return ne
       success: true,
       email: response.data.emailAddress,
     };
-  })
+  }, { detail: { summary: 'Get test', description: 'GET endpoint for test in the email module.', tags: ['Email'] } })
   .post(
     "/send",
     async ({ body, set }) => {
@@ -104,6 +104,7 @@ export function createEmailRoutes(sender: EmailSender = gmailSender) { return ne
       }
     },
     {
+      detail: { summary: 'Create send', description: 'POST endpoint for send in the email module.', tags: ['Email'] },
       body: t.Object({
         to: t.String({ format: "email", pattern: "^[^\\r\\n]+$" }),
         subject: t.String({ minLength: 1, maxLength: 200, pattern: "^[^\\r\\n]+$" }),

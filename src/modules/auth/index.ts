@@ -18,7 +18,10 @@ import {
 import { logger } from "../../utils/logger";
 import { db } from "@/db/index";
 
-export const authRoutes = new Elysia({ prefix: "auth" })
+export const authRoutes = new Elysia({
+  prefix: "auth",
+  detail: { tags: ["Authentication"] },
+})
   .model({
     ...LoginModel,
   })
@@ -37,6 +40,12 @@ export const authRoutes = new Elysia({ prefix: "auth" })
       return { message: "Unauthorized" };
     }
     return { ticket: await issueWsTicket(claims) };
+  }, {
+    detail: {
+      summary: "Create a WebSocket ticket",
+      description: "Create a short-lived ticket for an authenticated WebSocket connection.",
+      tags: ["Authentication"],
+    },
   })
   .get("/me", async ({ cookie: { access_token }, jwt, set }) => {
     if (!access_token.value || typeof access_token.value !== "string") {
@@ -67,6 +76,12 @@ export const authRoutes = new Elysia({ prefix: "auth" })
     }
 
     return { ...payload, id: user.id };
+  }, {
+    detail: {
+      summary: "Get the current user",
+      description: "Retrieve the authenticated user's session and profile claims.",
+      tags: ["Authentication"],
+    },
   })
   .post(
     "/refresh",
@@ -106,6 +121,13 @@ export const authRoutes = new Elysia({ prefix: "auth" })
       });
 
       return "ok";
+    },
+    {
+      detail: {
+        summary: "Refresh an access token",
+        description: "Issue a new access token using a valid refresh token.",
+        tags: ["Authentication"],
+      },
     },
   )
   .post(
@@ -160,6 +182,11 @@ export const authRoutes = new Elysia({ prefix: "auth" })
     },
     {
       body: "login",
+      detail: {
+        summary: "Log in",
+        description: "Authenticate a user and issue access and refresh tokens.",
+        tags: ["Authentication"],
+      },
     },
   )
   .post("/logout", async ({ cookie: { access_token, refresh_token }, jwt, refreshToken, set }) => {
@@ -177,4 +204,10 @@ export const authRoutes = new Elysia({ prefix: "auth" })
     return {
       message: "Logged out",
     };
+  }, {
+    detail: {
+      summary: "Log out",
+      description: "Revoke the current session and remove authentication cookies.",
+      tags: ["Authentication"],
+    },
   });

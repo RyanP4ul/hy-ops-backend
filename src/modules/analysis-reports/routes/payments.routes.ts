@@ -5,5 +5,9 @@ import { getPayments } from "../services/payments.service";
 
 export const paymentsRoutes = new Elysia({ name: "reports.payments" }).get("/payments", ({ query }) => getPayments(parseFilters(query)), {
   query: FiltersQuery,
-  detail: { tags: ["Reports"], summary: "Receipt/refund cashflow, balances and receivables aging" },
+  detail: {
+    tags: ["Reports"],
+    summary: "Get payments report",
+    description: "Retrieve receipt and refund cashflow, balances, and receivables aging.",
+  },
 });

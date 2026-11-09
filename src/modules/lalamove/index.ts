@@ -18,7 +18,7 @@ export const lalamoveRoutes = new Elysia({
         error: error instanceof Error ? error.message : "Unknown error",
       };
     }
-  })
+  }, { detail: { summary: 'Get cities', description: 'GET endpoint for cities in the lalamove module.', tags: ['Lalamove'] } })
   .post(
     "/quotations",
     async ({ body, set }) => {
@@ -32,7 +32,8 @@ export const lalamoveRoutes = new Elysia({
         };
       }
     },
-    { body: "lalamove.quotation" },
+    {
+      detail: { summary: 'Create quotations', description: 'POST endpoint for quotations in the lalamove module.', tags: ['Lalamove'] }, body: "lalamove.quotation" },
   )
   .post(
     "/orders",
@@ -47,5 +48,6 @@ export const lalamoveRoutes = new Elysia({
         };
       }
     },
-    { body: "lalamove.create" },
+    {
+      detail: { summary: 'Create orders', description: 'POST endpoint for orders in the lalamove module.', tags: ['Lalamove'] }, body: "lalamove.create" },
   );

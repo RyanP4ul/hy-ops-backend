@@ -19,6 +19,7 @@ function sameCoordinate(a: Coordinate, b: Coordinate): boolean {
 
 export const deliveryEstimateRoutes = new Elysia({
   prefix: "/delivery-estimates",
+  detail: { tags: ["Delivery Expenses"] },
 }).post(
   "/",
   async ({ body, set }) => {
@@ -152,5 +153,10 @@ export const deliveryEstimateRoutes = new Elysia({
       hasToll: t.Optional(t.Boolean()),
       estimatedTollFee: t.Optional(t.Number({ minimum: 0 })),
     }),
+    detail: {
+      summary: "Estimate delivery expenses",
+      description: "Calculate route distance, toll detection, and estimated delivery expenses.",
+      tags: ["Delivery Expenses"],
+    },
   },
 );

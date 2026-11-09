@@ -23,7 +23,7 @@ export const vehicleRoutes = new Elysia({ prefix: "/vehicles" })
       set.headers["X-Total-Count"] = String(result.total);
       return result.rows;
     }
-  })
+  }, { detail: { summary: 'List root', description: 'GET endpoint for root in the vehicles module.', tags: ['Vehicles'] } })
   .get("/:id", async ({ params, set }) => {
     const vehicle = await vehicleService.getVehicleById(Number(params.id));
     if (!vehicle) {
@@ -31,7 +31,7 @@ export const vehicleRoutes = new Elysia({ prefix: "/vehicles" })
       return { message: "Vehicle not found" };
     }
     return vehicle;
-  })
+  }, { detail: { summary: 'Get by id', description: 'GET endpoint for by id in the vehicles module.', tags: ['Vehicles'] } })
   .post(
     "/",
     async ({ body, set }) => {
@@ -46,7 +46,8 @@ export const vehicleRoutes = new Elysia({ prefix: "/vehicles" })
       }
       return result;
     },
-    { body: "vehicle.create" },
+    {
+      detail: { summary: 'Create root', description: 'POST endpoint for root in the vehicles module.', tags: ['Vehicles'] }, body: "vehicle.create" },
   )
   .put(
     "/:id",
@@ -66,6 +67,7 @@ export const vehicleRoutes = new Elysia({ prefix: "/vehicles" })
       return result;
     },
     {
+      detail: { summary: 'Update by id', description: 'PUT endpoint for by id in the vehicles module.', tags: ['Vehicles'] },
       params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
       body: "vehicle.update",
     },
@@ -77,7 +79,8 @@ export const vehicleRoutes = new Elysia({ prefix: "/vehicles" })
         Number(params.id),
         Number(query.version || 0),
       ),
-    { params: t.Object({ id: t.Numeric({ minimum: 1 }) }) },
+    {
+      detail: { summary: 'Delete by id', description: 'DELETE endpoint for by id in the vehicles module.', tags: ['Vehicles'] }, params: t.Object({ id: t.Numeric({ minimum: 1 }) }) },
   )
   .get("/cb", async ({ query, user }) => {
     const result = await vehicleService.getVehicleForCombobox(
@@ -88,4 +91,4 @@ export const vehicleRoutes = new Elysia({ prefix: "/vehicles" })
     );
 
     return result;
-  });
+  }, { detail: { summary: 'Get cb', description: 'GET endpoint for cb in the vehicles module.', tags: ['Vehicles'] } });

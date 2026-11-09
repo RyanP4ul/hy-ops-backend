@@ -10,6 +10,7 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   .use(orderModel)
   .post("/customers/:customerId/addresses", ({ params, body }) =>
     OrderService.saveShippingAddress(params.customerId, body), {
+      detail: { summary: 'Create customers by customerId addresses', description: 'POST endpoint for customers by customerId addresses in the orders module.', tags: ['Orders'] },
     params: t.Object({ customerId: t.Numeric({ minimum: 1 }) }),
     body: savedShippingAddressSchema,
   })
@@ -32,7 +33,7 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     set.headers["X-Total-Count"] = result.total;
 
     return result.rows;
-  })
+  }, { detail: { summary: 'List root', description: 'GET endpoint for root in the orders module.', tags: ['Orders'] } })
   .get(
     "/:id",
     async ({ params }) => {
@@ -45,6 +46,7 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
       return orderDetail;
     },
     {
+      detail: { summary: 'Get by id', description: 'GET endpoint for by id in the orders module.', tags: ['Orders'] },
       params: t.Object({
         id: t.Numeric({ minimum: 1 }),
       }),
@@ -54,23 +56,27 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     const assigned = await staffWarehouse(user);
     if (assigned !== undefined && assigned !== query.warehouse_id) throw new WorkflowError("Choose your assigned warehouse.", 403);
     return OrderService.getReadyOrderGroup(params.groupId, assigned ?? query.warehouse_id);
-  }, { params: t.Object({ groupId: t.String({ format: "uuid" }) }), query: t.Object({ warehouse_id: t.Numeric({ minimum: 1 }) }) })
+  }, {
+      detail: { summary: 'Get groups by groupId ready', description: 'GET endpoint for groups by groupId ready in the orders module.', tags: ['Orders'] }, params: t.Object({ groupId: t.String({ format: "uuid" }) }), query: t.Object({ warehouse_id: t.Numeric({ minimum: 1 }) }) })
   .get("/details", async ({ query }) => {
     const order_ids = query.ids ? query.ids.split(",").map(Number) : [];
     return await OrderService.getOrderDetailsByIds(order_ids);
-  })
+  }, { detail: { summary: 'Get details', description: 'GET endpoint for details in the orders module.', tags: ['Orders'] } })
   .get(
     "/eligibility/:customerId",
     ({ params }) =>
       OrderService.getCustomerOrderEligibility(params.customerId),
     {
+      detail: { summary: 'Get eligibility by customerId', description: 'GET endpoint for eligibility by customerId in the orders module.', tags: ['Orders'] },
       params: t.Object({ customerId: t.Numeric({ minimum: 1 }) }),
     },
   )
   .put("/:id", ({ params, body }) => OrderService.updateNotes(params.id, body.version, body.notes), {
+      detail: { summary: 'Update by id', description: 'PUT endpoint for by id in the orders module.', tags: ['Orders'] },
     params: t.Object({ id: t.Numeric({ minimum: 1 }) }), body: t.Object({ version: t.Integer({ minimum: 1 }), notes: t.String({ maxLength: 2000 }) }),
   })
   .put("/:id/destination", async ({ params, body, user }) => { await assertOrderScope(params.id, await staffWarehouse(user)); return OrderService.setDestination(params.id, body.version, body.latitude, body.longitude); }, {
+      detail: { summary: 'Update by id destination', description: 'PUT endpoint for by id destination in the orders module.', tags: ['Orders'] },
     params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
     body: t.Object({ version: t.Integer({ minimum: 1 }), latitude: t.Number({ minimum: -90, maximum: 90 }), longitude: t.Number({ minimum: -180, maximum: 180 }) }),
   })
@@ -83,7 +89,8 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     const rows = await Promise.all(created.map(order => OrderService.getOrderTableRowById(order.id)));
     if (rows.some(row => !row)) throw new Error("Failed to load created orders.");
     return { orders: rows, message: `${rows.length} orders created successfully.` };
-  }, { body: "order.batch" })
+  }, {
+      detail: { summary: 'Create batch', description: 'POST endpoint for batch in the orders module.', tags: ['Orders'] }, body: "order.batch" })
   .post(
     "/",
     async ({ body, set }) => {
@@ -93,6 +100,7 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
       return order;
     },
     {
+      detail: { summary: 'Create root', description: 'POST endpoint for root in the orders module.', tags: ['Orders'] },
       body: "order.create",
     },
   )
@@ -107,6 +115,7 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
       return order;
     },
     {
+      detail: { summary: 'Create process by id', description: 'POST endpoint for process by id in the orders module.', tags: ['Orders'] },
       query: t.Object({
         version: t.Numeric({ minimum: 1 }),
       }),
@@ -126,6 +135,7 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
       return order;
     },
     {
+      detail: { summary: 'Create delivery by id', description: 'POST endpoint for delivery by id in the orders module.', tags: ['Orders'] },
       query: t.Object({
         version: t.Numeric({ minimum: 1 }),
       }),
@@ -145,6 +155,7 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
       return order;
     },
     {
+      detail: { summary: 'Create cancel by id', description: 'POST endpoint for cancel by id in the orders module.', tags: ['Orders'] },
       query: t.Object({
         version: t.Numeric({ minimum: 1 }),
       }),
@@ -168,4 +179,4 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     );
 
     return result;
-  });
+  }, { detail: { summary: 'Get cb', description: 'GET endpoint for cb in the orders module.', tags: ['Orders'] } });

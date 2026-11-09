@@ -6,11 +6,20 @@ import { OrderService } from "../order/service";
 import { DeliveryService } from "../deliveries/service";
 import { InventoryService } from "../inventory/service";
 
-export const dashboardRoutes = new Elysia({ prefix: "/dashboard" })
+export const dashboardRoutes = new Elysia({
+  prefix: "/dashboard",
+  detail: { tags: ["Dashboard"] },
+})
 .decorate("user", {} as AuthUser)
 .get("/exceptions", async () => {
   const [operations, stock] = await Promise.all([DashboardService.getExceptions(), InventoryService.getSummary()]);
   return { ...operations, lowStock: stock.low, outOfStock: stock.out };
+}, {
+  detail: {
+    summary: "Get dashboard exceptions",
+    description: "Retrieve operational exceptions and inventory shortages.",
+    tags: ["Dashboard"],
+  },
 })
 .get(
   "/stats",
@@ -42,5 +51,12 @@ export const dashboardRoutes = new Elysia({ prefix: "/dashboard" })
       total_active_deliveries: total_active_deliveries,
       total_pending: total_pending,
     };
+  },
+  {
+    detail: {
+      summary: "Get dashboard statistics",
+      description: "Retrieve dashboard revenue, sales, delivery, order, and customer statistics.",
+      tags: ["Dashboard"],
+    },
   },
 );

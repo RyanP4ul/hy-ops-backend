@@ -26,7 +26,7 @@ export const warehouseRoutes = new Elysia({ prefix: "/warehouses" })
     );
     set.headers["X-Total-Count"] = result.total;
     return result.rows;
-  })
+  }, { detail: { summary: 'List root', description: 'GET endpoint for root in the warehouses module.', tags: ['Warehouses'] } })
   .get("/names", async ({ query, set, user }) => {
     const scope = await staffWarehouse(user);
     if (scope !== undefined) {
@@ -43,7 +43,7 @@ export const warehouseRoutes = new Elysia({ prefix: "/warehouses" })
       search,
     );
     return result;
-  })
+  }, { detail: { summary: 'Get names', description: 'GET endpoint for names in the warehouses module.', tags: ['Warehouses'] } })
   .get("/:id", async ({ params, set }) => {
     const warehouse = await warehouseService.getWarehouseById(
       Number(params.id),
@@ -53,7 +53,7 @@ export const warehouseRoutes = new Elysia({ prefix: "/warehouses" })
       return { message: "Warehouse not found" };
     }
     return warehouse;
-  })
+  }, { detail: { summary: 'Get by id', description: 'GET endpoint for by id in the warehouses module.', tags: ['Warehouses'] } })
   .post(
     "/",
     async ({ body, set }) => {
@@ -67,6 +67,7 @@ export const warehouseRoutes = new Elysia({ prefix: "/warehouses" })
       return result;
     },
     {
+      detail: { summary: 'Create root', description: 'POST endpoint for root in the warehouses module.', tags: ['Warehouses'] },
       body: "warehouse.create",
     },
   )
@@ -86,6 +87,7 @@ export const warehouseRoutes = new Elysia({ prefix: "/warehouses" })
       return result;
     },
     {
+      detail: { summary: 'Update by id', description: 'PUT endpoint for by id in the warehouses module.', tags: ['Warehouses'] },
       params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
       body: "warehouse.update",
     },
@@ -98,7 +100,8 @@ export const warehouseRoutes = new Elysia({ prefix: "/warehouses" })
         Number(query.version || 0),
       );
     },
-    { params: t.Object({ id: t.Numeric({ minimum: 1 }) }) },
+    {
+      detail: { summary: 'Delete by id', description: 'DELETE endpoint for by id in the warehouses module.', tags: ['Warehouses'] }, params: t.Object({ id: t.Numeric({ minimum: 1 }) }) },
   )
   .post(
     "/:id/archive",
@@ -112,5 +115,6 @@ export const warehouseRoutes = new Elysia({ prefix: "/warehouses" })
         Number(query.version || 0),
       );
     },
-    { params: t.Object({ id: t.Numeric({ minimum: 1 }) }) },
+    {
+      detail: { summary: 'Create by id archive', description: 'POST endpoint for by id archive in the warehouses module.', tags: ['Warehouses'] }, params: t.Object({ id: t.Numeric({ minimum: 1 }) }) },
   );

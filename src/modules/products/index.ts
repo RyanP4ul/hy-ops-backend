@@ -27,7 +27,7 @@ export const productRoutes = new Elysia({ prefix: "/products" })
     set.headers["X-Total-Count"] = products.total;
 
     return products.rows;
-  })
+  }, { detail: { summary: 'List root', description: 'GET endpoint for root in the products module.', tags: ['Products'] } })
   .get(
     "/:id",
     async ({ params, set }) => {
@@ -45,6 +45,7 @@ export const productRoutes = new Elysia({ prefix: "/products" })
       return product;
     },
     {
+      detail: { summary: 'Get by id', description: 'GET endpoint for by id in the products module.', tags: ['Products'] },
       params: t.Object({
         id: t.Numeric({ minimum: 1 }),
       }),
@@ -71,6 +72,7 @@ export const productRoutes = new Elysia({ prefix: "/products" })
       return variant;
     },
     {
+      detail: { summary: 'Get variant by variant id', description: 'GET endpoint for variant by variant id in the products module.', tags: ['Products'] },
       params: t.Object({
         variant_id: t.Numeric({ minimum: 1 }),
       }),
@@ -115,6 +117,7 @@ export const productRoutes = new Elysia({ prefix: "/products" })
       return product;
     },
     {
+      detail: { summary: 'Create root', description: 'POST endpoint for root in the products module.', tags: ['Products'] },
       body: "product.create",
     },
   )
@@ -176,6 +179,7 @@ export const productRoutes = new Elysia({ prefix: "/products" })
       return updatedProduct;
     },
     {
+      detail: { summary: 'Update by id', description: 'PUT endpoint for by id in the products module.', tags: ['Products'] },
       body: "product.update",
     },
   )
@@ -207,4 +211,4 @@ export const productRoutes = new Elysia({ prefix: "/products" })
     }
 
     return result;
-  });
+  }, { detail: { summary: 'Delete by id', description: 'DELETE endpoint for by id in the products module.', tags: ['Products'] } });

@@ -6,7 +6,12 @@ import { logger } from "../../utils/logger";
 import { UserMutationError } from "./mutation-policy";
 import { AuthUser } from "../auth/schema";
 
-export const userRoutes = new Elysia({ prefix: "/users" })
+export const userRoutes = new Elysia({ 
+  prefix: "/users",
+  detail: {
+    tags: ["Users"]
+  }
+})
   .decorate("user", {} as AuthUser)
   .use(userModel)
   .onError(({ error, set }) => {
@@ -48,6 +53,12 @@ export const userRoutes = new Elysia({ prefix: "/users" })
 
     set.headers["X-Total-Count"] = result.total;
     return result.rows;
+  }, {
+    detail: {
+      summary: "Get all users",
+      description: "Retrieve all registered users.",
+      tags: ["Users"]
+    }
   })
   .get("/customers", async ({ query }) => {
     const page = Math.max(Number.parseInt(query.page ?? "0", 10) || 0, 0);
@@ -58,10 +69,23 @@ export const userRoutes = new Elysia({ prefix: "/users" })
 
     const contact = query.contact === "phone" || query.contact === "email" ? query.contact : undefined;
     return await UserService.getCustomers(page, limit, query.search?.trim() ?? "", contact);
+  }, {
+    detail: {
+      summary: "Get customers",
+      description: "Retrieve customer accounts with optional search and contact filtering.",
+      tags: ["Users"]
+    }
   })
   .get(
     "/:id",
     async ({ params }) => await UserService.getUserById(Number(params.id)),
+    {
+      detail: {
+        summary: "Get a user",
+        description: "Retrieve a user account by its identifier.",
+        tags: ["Users"]
+      }
+    }
   )
   .post(
     "/",
@@ -77,6 +101,11 @@ export const userRoutes = new Elysia({ prefix: "/users" })
     },
     {
       body: "user.create",
+      detail: {
+        summary: "Create a user",
+        description: "Create a new user account.",
+        tags: ["Users"]
+      }
     },
   )
   .put(
@@ -104,6 +133,11 @@ export const userRoutes = new Elysia({ prefix: "/users" })
     {
       params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
       body: "user.update",
+      detail: {
+        summary: "Update a user",
+        description: "Update an existing user account by its identifier.",
+        tags: ["Users"]
+      }
     },
   )
   .patch(
@@ -125,6 +159,11 @@ export const userRoutes = new Elysia({ prefix: "/users" })
     {
       params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
       body: "user.changePassword",
+      detail: {
+        summary: "Change a user's password",
+        description: "Change the password for an existing user account.",
+        tags: ["Users"]
+      }
     },
   )
   .delete(
@@ -140,7 +179,14 @@ export const userRoutes = new Elysia({ prefix: "/users" })
         Number(query.version),
       );
     },
-    { params: t.Object({ id: t.Numeric({ minimum: 1 }) }) },
+    {
+      params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+      detail: {
+        summary: "Delete a user",
+        description: "Permanently delete a user account by its identifier.",
+        tags: ["Users"]
+      }
+    },
   )
   .post(
     "/:id/archive",
@@ -157,7 +203,14 @@ export const userRoutes = new Elysia({ prefix: "/users" })
         { id: Number(user.sub), tokenVersion: Number(user.token_version) },
       );
     },
-    { params: t.Object({ id: t.Numeric({ minimum: 1 }) }) },
+    {
+      params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+      detail: {
+        summary: "Deactivate a user",
+        description: "Deactivate a user account without permanently deleting it.",
+        tags: ["Users"]
+      }
+    },
   )
   .get("/drivers", async ({ query, user }) => {
     const page = Math.max(Number.parseInt(query.page ?? "0", 10) || 0, 0);
@@ -168,6 +221,12 @@ export const userRoutes = new Elysia({ prefix: "/users" })
     const search = query.search?.trim() ?? "";
     const warehouse_id = await staffWarehouse(user) ?? (query.warehouse_id ? Number(query.warehouse_id) : -1);
     return await UserService.getAllDrivers(page, limit, search, warehouse_id);
+  }, {
+    detail: {
+      summary: "Get drivers",
+      description: "Retrieve driver accounts available to the current warehouse scope.",
+      tags: ["Users"]
+    }
   });
 // .post("/", async ({ body }) => UserService.createUser(body, { id: Number(user.sub), tokenVersion: Number(user.token_version) }), {
 //   body: t.Object({

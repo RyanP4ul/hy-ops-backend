@@ -9,7 +9,8 @@ export const productVariantRoutes = new Elysia({
   const search = query.search ? query.search.trim() : "";
 
   return await ProductVariantService.getProductVariants(page, limit, search, query.exclude_inventory_warehouse_id);
-}, { query: t.Object({
+}, {
+      detail: { summary: 'List root', description: 'GET endpoint for root in the product variants module.', tags: ['Product Variants'] }, query: t.Object({
   page: t.Optional(t.String({ pattern: "^[0-9]+$" })),
   limit: t.Optional(t.String({ pattern: "^[1-9][0-9]*$" })),
   search: t.Optional(t.String()),

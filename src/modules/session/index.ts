@@ -10,7 +10,7 @@ export const sessionRoutes = new Elysia({ prefix: "/sessions" })
   //.onBeforeHandle(({ user, set }) => requireRole([Role.ADMIN], { user, set }))
   .get("/me", async ({ user }) => {
     return user;
-  })
+  }, { detail: { summary: 'Get me', description: 'GET endpoint for me in the sessions module.', tags: ['Sessions'] } })
   .get("/", async ({ query, set }) => {
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;
@@ -47,7 +47,7 @@ export const sessionRoutes = new Elysia({ prefix: "/sessions" })
     set.headers["X-Total-Count"] = total;
 
     return sessions;
-  })
+  }, { detail: { summary: 'List root', description: 'GET endpoint for root in the sessions module.', tags: ['Sessions'] } })
   .delete("/:id", async ({ params, set }) => {
     const session = socketManager.getSocket(params.id);
 
@@ -59,7 +59,7 @@ export const sessionRoutes = new Elysia({ prefix: "/sessions" })
     session.ws.close(4001, "Disconnected by administrator");
 
     return { success: true };
-  })
+  }, { detail: { summary: 'Delete by id', description: 'DELETE endpoint for by id in the sessions module.', tags: ['Sessions'] } })
   .get("/logs", async ({ query, set }) => {
     const page = query.page ? parseInt(query.page) : 1;
     const limit = query.limit ? parseInt(query.limit) : 10;
@@ -70,4 +70,4 @@ export const sessionRoutes = new Elysia({ prefix: "/sessions" })
     set.headers["X-Total-Count"] = result.total;
 
     return result.rows;
-  });
+  }, { detail: { summary: 'Get logs', description: 'GET endpoint for logs in the sessions module.', tags: ['Sessions'] } });

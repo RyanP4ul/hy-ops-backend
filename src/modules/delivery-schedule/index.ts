@@ -24,7 +24,7 @@ export const deliveryScheduleRoutes = new Elysia({
     set.headers["X-Total-Count"] = result.total;
 
     return result.rows;
-  })
+  }, { detail: { summary: 'List root', description: 'GET endpoint for root in the delivery schedules module.', tags: ['Delivery Schedules'] } })
   .decorate("user", {} as AuthUser)
   .get("/available-dates", async ({ query, user }) => {
     const maxOrdersPerDay = 5;
@@ -36,4 +36,4 @@ export const deliveryScheduleRoutes = new Elysia({
       daysAhead: days,
       warehouse_id,
     });
-  });
+  }, { detail: { summary: 'Get available dates', description: 'GET endpoint for available dates in the delivery schedules module.', tags: ['Delivery Schedules'] } });

@@ -52,5 +52,10 @@ export const cloudflareR2Routes = new Elysia({
         maxSize: 5 * 1024 * 1024,
       }),
     }),
+    detail: {
+      summary: "Upload a product image",
+      description: "Upload an image associated with a delivery.",
+      tags: ["Cloudflare"],
+    },
   },
 );

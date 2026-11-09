@@ -25,7 +25,13 @@ import { salesRoutes } from "./routes/sales.routes";
  * The application mounts this module inside the authenticated role guard.
  * Reports are available to administrative and operational staff roles.
  */
-export const reportsModule = new Elysia({ prefix: "/reports", name: "reports" })
+export const reportsModule = new Elysia({ 
+  prefix: "/reports", 
+  name: "reports",
+  detail: {
+    tags: ["Analysis and Reports"]
+  }
+})
   .use(optionsRoutes)
   .use(overviewRoutes)
   .use(salesRoutes)

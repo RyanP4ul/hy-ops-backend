@@ -4,7 +4,12 @@ import { UserService } from "../user/service";
 import { UserMutationError } from "../user/mutation-policy";
 import { ArchiveService } from "./service";
 
-export const archivesRoutes = new Elysia({ prefix: "/archives" })
+export const archivesRoutes = new Elysia({ 
+  prefix: "/archives",
+  detail: {
+    tags: ["Archives"]
+  }
+})
   .decorate("user", AuthUser)
   .onError(({ error, set }) => {
     if (error instanceof UserMutationError) { set.status = error.status; return { message: error.message }; }
@@ -23,8 +28,20 @@ export const archivesRoutes = new Elysia({ prefix: "/archives" })
 
     set.headers["X-Total-Count"] = result.total;
     return result.rows;
+  }, {
+    detail: {
+      summary: "Get archived users",
+      description: "Retrieve archived user accounts with pagination.",
+      tags: ["Archives"],
+    },
   })
   .put("/:id/restore", async ({ params, user }) => {
     const archiveId = parseInt(params.id);
     return await ArchiveService.restoreArchive(archiveId, { id: Number(user.sub), tokenVersion: Number(user.token_version) });
+  }, {
+    detail: {
+      summary: "Restore an archived user",
+      description: "Restore an archived user account by its identifier.",
+      tags: ["Archives"],
+    },
   });

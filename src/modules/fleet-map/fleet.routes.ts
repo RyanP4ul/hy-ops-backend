@@ -22,7 +22,8 @@ export const fleetRoutes = new Elysia({
   /** One call hydrates the whole map: vehicles (with trips/stops/orders) + warehouses. */
   .decorate("user", {} as AuthUser)
   .use(fleetMapModel)
-  .get("/", ({ user }) => getFleetOverview(user), { response: FleetOverviewDto })
+  .get("/", ({ user }) => getFleetOverview(user), {
+      detail: { summary: 'List root', description: 'GET endpoint for root in the fleet module.', tags: ['Fleet'] }, response: FleetOverviewDto })
   .get(
     "/positions",
     () => {
@@ -30,6 +31,7 @@ export const fleetRoutes = new Elysia({
       return positions;
     },
     {
+      detail: { summary: 'Get positions', description: 'GET endpoint for positions in the fleet module.', tags: ['Fleet'] },
       response: PositionsResponse,
     },
   )
@@ -37,6 +39,7 @@ export const fleetRoutes = new Elysia({
     "/vehicles/:id/warehouse",
     ({ params, body }) => assignVehicleWarehouse(params.id, body.warehouseId),
     {
+      detail: { summary: 'Update vehicles by id warehouse', description: 'PATCH endpoint for vehicles by id warehouse in the fleet module.', tags: ['Fleet'] },
       params: t.Object({ id: t.Numeric() }),
       body: AssignWarehouseBody,
       response: t.Object({ ok: t.Literal(true) }),

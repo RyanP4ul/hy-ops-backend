@@ -1,3 +1,4 @@
+import { openapi } from '@elysia/openapi'
 import type { SmsGateway } from "./modules/sms/service";
 import { startDeliveryNotificationWorker } from "./modules/deliveries/notification-worker";
 import { startDriverEvents } from "./modules/driver/assignment-events";
@@ -133,6 +134,27 @@ export function createApp(
           credentials: true,
         }),
       )
+	  .use(
+	      openapi({
+			  path: "/docs",
+			  provider: "swagger-ui",
+			  documentation: {
+				info: {
+				  title: "HYOps API Documentation",
+				  version: "1.0.0",
+				  description:
+					"API documentation for the HYOps web and mobile applications."
+				},
+				/*
+				tags: [
+				  { name: "Authentication", description: "User authentication" },
+				  { name: "Website", description: "Website API endpoints" },
+				  { name: "Mobile", description: "Flutter mobile API endpoints" },
+				  { name: "Shared", description: "Shared API endpoints" }
+				]*/
+			  }
+			})
+	  )
       .use(authPlugin)
       .onBeforeHandle(({ request, set }) => {
         if (

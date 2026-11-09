@@ -7,13 +7,17 @@ import { previewReconciliation, reconcileReservations } from "./reconciliation";
 export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
   .decorate("user", AuthUser)
   .use(inventoryModel)
-  .get("/reconciliation", () => previewReconciliation())
+  .get("/reconciliation", () => previewReconciliation(), { detail: { summary: 'Get reconciliation', description: 'GET endpoint for reconciliation in the inventory module.', tags: ['Inventory'] } })
   .post("/reconciliation", ({ body, user }) => reconcileReservations(body.token, body.reason, Number(user.sub)), {
+      detail: { summary: 'Create reconciliation', description: 'POST endpoint for reconciliation in the inventory module.', tags: ['Inventory'] },
     body: t.Object({ token: t.String({ minLength: 64, maxLength: 64 }), reason: t.String({ minLength: 1, maxLength: 500 }) }),
   })
-  .get("/:id/movements", ({ params }) => InventoryService.getMovements(params.id), { params: t.Object({ id: t.Numeric({ minimum: 1 }) }) })
-  .get("/reorder", ({ query }) => InventoryService.getReorderSuggestions(query.warehouse_id ?? null), { query: t.Object({ warehouse_id: t.Optional(t.Numeric({ minimum: 1 })) }) })
+  .get("/:id/movements", ({ params }) => InventoryService.getMovements(params.id), {
+      detail: { summary: 'Get by id movements', description: 'GET endpoint for by id movements in the inventory module.', tags: ['Inventory'] }, params: t.Object({ id: t.Numeric({ minimum: 1 }) }) })
+  .get("/reorder", ({ query }) => InventoryService.getReorderSuggestions(query.warehouse_id ?? null), {
+      detail: { summary: 'Get reorder', description: 'GET endpoint for reorder in the inventory module.', tags: ['Inventory'] }, query: t.Object({ warehouse_id: t.Optional(t.Numeric({ minimum: 1 })) }) })
   .get("/summary", ({ query }) => InventoryService.getSummary(query.warehouse_id ? Number(query.warehouse_id) : null), {
+      detail: { summary: 'Get summary', description: 'GET endpoint for summary in the inventory module.', tags: ['Inventory'] },
     query: t.Object({ warehouse_id: t.Optional(t.Numeric({ minimum: 1 })) }),
   })
   .get("/", async ({ query, set }) => {
@@ -46,11 +50,11 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
     set.headers["X-Total-Count"] = inventory.total;
 
     return inventory.rows;
-  })
+  }, { detail: { summary: 'List root', description: 'GET endpoint for root in the inventory module.', tags: ['Inventory'] } })
   .get("/:id", async ({ params }) => {
     const id = parseInt(params.id);
     return await InventoryService.getInventoryById(id);
-  })
+  }, { detail: { summary: 'Get by id', description: 'GET endpoint for by id in the inventory module.', tags: ['Inventory'] } })
   .post(
     "/",
     async ({ body }) => {
@@ -67,6 +71,7 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
       return inventory;
     },
     {
+      detail: { summary: 'Create root', description: 'POST endpoint for root in the inventory module.', tags: ['Inventory'] },
       body: "inventory.create",
     },
   )
@@ -86,6 +91,7 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
       return inventory;
     },
     {
+      detail: { summary: 'Update by id', description: 'PUT endpoint for by id in the inventory module.', tags: ['Inventory'] },
       body: "inventory.update",
     },
   )
@@ -94,14 +100,14 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
     const version = parseInt(query.version) || -1;
 
     return await InventoryService.deleteInventory(id, version);
-  })
+  }, { detail: { summary: 'Delete by id', description: 'DELETE endpoint for by id in the inventory module.', tags: ['Inventory'] } })
   .get("/names", async ({ query }) => {
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;
     const warehouse_id = query.warehouse_id ? parseInt(query.warehouse_id) : -1;
     return await InventoryService.getInventoryNames(page, limit, warehouse_id);
-  })
+  }, { detail: { summary: 'Get names', description: 'GET endpoint for names in the inventory module.', tags: ['Inventory'] } })
   .get("/details", async ({ query }) => {
     const order_ids = query.ids ? query.ids.split(",").map(Number) : [];
     return await InventoryService.getInventoryDetailById(order_ids);
-  });
+  }, { detail: { summary: 'Get details', description: 'GET endpoint for details in the inventory module.', tags: ['Inventory'] } });
