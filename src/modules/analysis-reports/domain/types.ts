@@ -11,6 +11,7 @@ export interface ItemView {
   inventoryId: number; productId: number; product: string; variantId: number; variant: string; sku: string; qty: number; line: number | null;
 }
 export interface OrderView {
+  salesChannel?: "STANDARD" | "WALK_IN";
   id: number; number: string; at: number; customerId: number; customer: string; warehouseId: number; warehouse: string; status: OrderStatus;
   arrangement: PaymentArrangement; items: ItemView[]; total: number | null; paid: number; balance: number | null; dueAt: number | null;
   payStatus: PaymentStatus; delivery: DeliveryView | null;

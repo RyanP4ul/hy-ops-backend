@@ -29,7 +29,7 @@ export abstract class UserService {
   }
 
   static async getUsers(page = 0, limit = 10, search = "") {
-    const is_archived_query = eq(users.is_archived, false);
+    const is_archived_query = and(eq(users.is_archived, false), sql`${users.email} <> 'walkin@system.local'`);
 
     const searchQuery = search
       ? or(ilike(users.name, `%${search}%`), ilike(users.email, `%${search}%`))
@@ -63,6 +63,8 @@ export abstract class UserService {
           city_municipality: customer_addresses.city_municipality,
           province: customer_addresses.province,
           postal_code: customer_addresses.postal_code,
+              latitude: customer_addresses.latitude,
+              longitude: customer_addresses.longitude,
           phone_number: customers.phone_number,
         },
 
@@ -112,6 +114,7 @@ export abstract class UserService {
   static async getCustomers(page = 0, limit = 10, search = "", contact?: "phone" | "email") {
     const filters = and(
       eq(users.role, "customer"), eq(users.is_archived, false),
+      sql`${users.email} <> 'walkin@system.local'`,
       sql`${customers.id} is not null`,
       search ? or(ilike(users.name, `%${search}%`), ilike(customers.company_name, `%${search}%`), ilike(customers.phone_number, `%${search}%`), ilike(users.email, `%${search}%`)) : undefined,
       contact === "phone" ? sql`nullif(trim(${customers.phone_number}), '') is not null` : contact === "email" ? sql`nullif(trim(${users.email}), '') is not null` : undefined,
@@ -152,6 +155,8 @@ export abstract class UserService {
               city_municipality: customer_addresses.city_municipality,
               province: customer_addresses.province,
               postal_code: customer_addresses.postal_code,
+              latitude: customer_addresses.latitude,
+              longitude: customer_addresses.longitude,
             })
             .from(customer_addresses)
             .where(inArray(customer_addresses.customer_id, customerIds))

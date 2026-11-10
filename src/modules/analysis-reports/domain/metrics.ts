@@ -92,6 +92,7 @@ export function trend(rows: { at: number; v: number }[], grain: Grain): Point[] 
 }
 
 export const toOrderRow = (o: OrderView): OrderRow => ({
+  salesChannel: o.salesChannel,
   id: o.id, number: o.number, at: o.at, customerId: o.customerId, customer: o.customer, warehouse: o.warehouse, itemCount: o.items.length,
   total: o.total, paid: o.paid, balance: o.balance, arrangement: o.arrangement, dueAt: o.dueAt, payStatus: o.payStatus, status: o.status,
 });

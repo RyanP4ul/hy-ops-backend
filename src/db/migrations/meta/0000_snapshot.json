@@ -1,5 +1,5 @@
 {
-  "id": "ea83d9fa-cd41-4fbc-ae9a-5108943fc9fe",
+  "id": "71218fc1-654a-45b8-83e3-df89a6658611",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -2384,7 +2384,7 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "default": 1794218805
+          "default": 1794317500
         }
       },
       "indexes": {
@@ -2737,6 +2737,31 @@
           "notNull": true,
           "default": false
         },
+        "sales_channel": {
+          "name": "sales_channel",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'STANDARD'"
+        },
+        "walk_in_checkout_key": {
+          "name": "walk_in_checkout_key",
+          "type": "varchar(36)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "walk_in_checkout_fingerprint": {
+          "name": "walk_in_checkout_fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "walk_in_amount_tendered": {
+          "name": "walk_in_amount_tendered",
+          "type": "numeric(20, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
         "delivery_method": {
           "name": "delivery_method",
           "type": "varchar(16)",
@@ -2895,6 +2920,13 @@
             "order_number"
           ]
         },
+        "orders_walk_in_checkout_key_unique": {
+          "name": "orders_walk_in_checkout_key_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "walk_in_checkout_key"
+          ]
+        },
         "orders_group_position_unique": {
           "name": "orders_group_position_unique",
           "nullsNotDistinct": false,
@@ -2906,9 +2938,13 @@
       },
       "policies": {},
       "checkConstraints": {
+        "orders_sales_channel_valid": {
+          "name": "orders_sales_channel_valid",
+          "value": "\"orders\".\"sales_channel\" in ('STANDARD', 'WALK_IN')"
+        },
         "orders_delivery_method_valid": {
           "name": "orders_delivery_method_valid",
-          "value": "\"orders\".\"delivery_method\" in ('INTERNAL', 'LALAMOVE', 'PICKUP')"
+          "value": "\"orders\".\"delivery_method\" in ('INTERNAL', 'LALAMOVE', 'PICKUP', 'WALK_IN')"
         }
       },
       "isRLSEnabled": false

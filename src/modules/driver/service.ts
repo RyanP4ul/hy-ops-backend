@@ -113,7 +113,7 @@ export class DriverService {
         .select({
           stop: deliveries_stops,
           order: orders,
-          customerName: users.name,
+          customerName: sql<string>`coalesce(nullif(trim(${orders.shipping_recipient}), ''), ${users.name})`,
         })
         .from(deliveries_stops)
         .innerJoin(orders, eq(orders.id, deliveries_stops.order_id))

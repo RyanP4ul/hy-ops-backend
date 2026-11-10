@@ -66,6 +66,31 @@ export const orderCreateSchema = t.Object({
 });
 export type CreateOrderInput = Static<typeof orderCreateSchema>;
 
+export const walkInOrderSchema = t.Object({
+  fulfillment: t.Optional(t.Union([t.Literal("TAKEAWAY"), t.Literal("DELIVERY")])),
+  checkout_key: t.Optional(t.String({ format: "uuid" })),
+  shipping_recipient: t.Optional(t.String({ maxLength: 60 })),
+  shipping_phone: t.Optional(t.String({ maxLength: 20 })),
+  shipping_address: t.Optional(t.String({ maxLength: 1000 })),
+  shipping_latitude: t.Optional(t.Number({ minimum: -90, maximum: 90 })),
+  shipping_longitude: t.Optional(t.Number({ minimum: -180, maximum: 180 })),
+  customer_address_id: t.Optional(t.Numeric({ minimum: 1 })),
+  warehouse_id: t.Numeric({ minimum: 1 }),
+  customer_id: t.Optional(t.Numeric({ minimum: 1 })),
+  walk_in_name: t.Optional(t.String({ maxLength: 60 })),
+  walk_in_phone: t.Optional(t.String({ maxLength: 20 })),
+  notes: t.Optional(t.String({ maxLength: 2000 })),
+  payment_method: t.Union([
+    t.Literal("BANK_TRANSFER"),
+    t.Literal("CASH"),
+    t.Literal("CARD"),
+  ]),
+  payment_type: t.Optional(t.String({ minLength: 1, maxLength: 100, pattern: "\\S" })),
+  amount_tendered: t.Numeric({ minimum: 0 }),
+  items: t.Array(orderItemSchema, { minItems: 1 }),
+});
+export type WalkInOrderInput = Static<typeof walkInOrderSchema>;
+
 const separateOrderBatchSchema = t.Object({
   customer_id: t.Numeric({ minimum: 1 }),
   payment_mode: t.Optional(t.Literal("SEPARATE")),
@@ -90,6 +115,7 @@ export type OrderBatchInput = Static<typeof orderBatchSchema>;
 
 export const orderModel = new Elysia().model({
   "order.create": orderCreateSchema,
+  "order.walk_in": walkInOrderSchema,
   "order.batch": orderBatchSchema,
   "order.update": t.Object({
     ...orderUpdateSchema.properties,

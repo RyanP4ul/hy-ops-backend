@@ -23,6 +23,7 @@
     "lint:fix": "oxlint --fix",
     "lint:rules": "oxlint --rules",
     "test": "bun run tests/run-tests.ts",
+    "test:walk-in": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-walk-in-delivery.ps1",
     "test:db": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-database.ps1"
   },
   "dependencies": {

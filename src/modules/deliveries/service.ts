@@ -201,6 +201,7 @@ export abstract class DeliveryService {
         for (const id of data.order_ids) {
           const order = locked.find(member => member.id === id);
           if (!order || order.status !== "SCHEDULING") throw new WorkflowError("An order is no longer ready for scheduling. Refresh and try again.");
+          if (order.delivery_method === "WALK_IN") throw new WorkflowError("Counter takeaway orders cannot be assigned for delivery.");
           if (order.delivery_method === "LALAMOVE") throw new WorkflowError("This order uses Lalamove. Change its delivery method before internal assignment.");
           await assertNoExternalClaim(tx, id);
           selectedOrders.set(id, order);

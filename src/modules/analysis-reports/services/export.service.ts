@@ -48,6 +48,7 @@ async function build(
         table: {
           columns: [
             col("number", "Order"),
+            col("salesChannel", "Sale type"),
             col("date", "Date"),
             col("customer", "Customer"),
             col("warehouse", "Warehouse"),
@@ -61,6 +62,7 @@ async function build(
           ],
           rows: orders.map((o) => ({
             number: o.number,
+            salesChannel: o.salesChannel === "WALK_IN" ? "Walk-in sale" : "Standard order",
             date: manilaDay(o.at),
             customer: o.customer,
             warehouse: o.warehouse,

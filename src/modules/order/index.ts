@@ -94,6 +94,26 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   }, {
       detail: { summary: 'Create batch', description: 'POST endpoint for batch in the orders module.', tags: ['Orders'] }, body: "order.batch" })
   .post(
+    "/walk-in",
+    async ({ body, user }) => {
+      const warehouseId = await staffWarehouse(user);
+      const result = await OrderService.createWalkInOrder(body, warehouseId);
+      const order = await OrderService.getOrderTableRowById(result.id);
+      if (!order) throw new Error("Failed to load created walk-in order.");
+      return {
+        ...order,
+        order_number: result.order_number,
+        amount_tendered: result.amount_tendered,
+        change_due: result.change_due,
+        message: result.message,
+      };
+    },
+    {
+      detail: { summary: 'Create walk-in counter sale', description: 'Take full walk-in payment with immediate takeaway or company vehicle delivery.', tags: ['Orders'] },
+      body: "order.walk_in",
+    },
+  )
+  .post(
     "/",
     async ({ body, set }) => {
       const result = await OrderService.createOrder(body);

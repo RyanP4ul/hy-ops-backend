@@ -298,7 +298,7 @@ CREATE TABLE "notifications" (
 	"message" text NOT NULL,
 	"type" varchar(50) NOT NULL,
 	"is_read" boolean DEFAULT false NOT NULL,
-	"created_at" integer DEFAULT 1794218805 NOT NULL,
+	"created_at" integer DEFAULT 1794317500 NOT NULL,
 	CONSTRAINT "notifications_user_title_unique_idx" UNIQUE("user_id","title")
 );
 --> statement-breakpoint
@@ -332,6 +332,10 @@ CREATE TABLE "orders" (
 	"order_group_position" integer,
 	"notes" text,
 	"stock_reserved" boolean DEFAULT false NOT NULL,
+	"sales_channel" varchar(16) DEFAULT 'STANDARD' NOT NULL,
+	"walk_in_checkout_key" varchar(36),
+	"walk_in_checkout_fingerprint" text,
+	"walk_in_amount_tendered" numeric(20, 2),
 	"delivery_method" varchar(16),
 	"lalamove_pickup_warehouse_id" integer,
 	"status" "order_status" DEFAULT 'PENDING' NOT NULL,
@@ -345,8 +349,10 @@ CREATE TABLE "orders" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "orders_order_number_unique" UNIQUE("order_number"),
+	CONSTRAINT "orders_walk_in_checkout_key_unique" UNIQUE("walk_in_checkout_key"),
 	CONSTRAINT "orders_group_position_unique" UNIQUE("order_group_id","order_group_position"),
-	CONSTRAINT "orders_delivery_method_valid" CHECK ("orders"."delivery_method" in ('INTERNAL', 'LALAMOVE', 'PICKUP'))
+	CONSTRAINT "orders_sales_channel_valid" CHECK ("orders"."sales_channel" in ('STANDARD', 'WALK_IN')),
+	CONSTRAINT "orders_delivery_method_valid" CHECK ("orders"."delivery_method" in ('INTERNAL', 'LALAMOVE', 'PICKUP', 'WALK_IN'))
 );
 --> statement-breakpoint
 CREATE TABLE "payments" (

@@ -1053,4 +1053,141 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     expect((await OrderService.getOrders(0, 10, '', 'LALAMOVE')).total).toBe(0);
   });
 
+  test("walk-in order completes immediately, consumes stock, issues invoice, hides system account, and blocks dispatch transitions", async () => {
+    await seed();
+    const [item] = await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
+    await rejected(() => OrderService.createWalkInOrder({
+      warehouse_id: 1,
+      payment_method: "CASH",
+      amount_tendered: 20,
+      items: [{ inventory_id: item.id, quantity: 2 }],
+    }), "must be at least the order total");
+    await rejected(() => OrderService.createWalkInOrder({
+      warehouse_id: 1,
+      payment_method: "CASH",
+      amount_tendered: 30,
+      items: [{ inventory_id: item.id, quantity: 2 }],
+    }, 2), "assigned warehouse");
+    const sale = await OrderService.createWalkInOrder({
+      warehouse_id: 1,
+      walk_in_name: "Juan Walk-In",
+      walk_in_phone: "09171234567",
+      payment_method: "CASH",
+      amount_tendered: 30,
+      items: [{ inventory_id: item.id, quantity: 2 }],
+    }, 1);
+    expect(sale).toMatchObject({ total: 24.68, amount_tendered: 30, change_due: 5.32 });
+    const [stock] = await sql`select quantity, reserved from inventory where id=${item.id}`;
+    expect(stock).toMatchObject({ quantity: 8, reserved: 0 });
+    const detail = await OrderService.getOrderById(sale.id);
+    expect(detail).toMatchObject({ status: "COMPLETED", delivery_type: "WALK_IN", payment_arrangement: "FULLY_PAID", amount_paid: 24.68, shipping_recipient: "Juan Walk-In" });
+    const invoice = await InvoiceService.getInvoiceByOrderId(sale.id);
+    expect(invoice).toMatchObject({ status: "ISSUED", payment_status: "PAID", delivery_type: "WALK_IN", amount_paid: 24.68 });
+    expect(invoice.customer.name).toBe("Juan Walk-In");
+    expect((await OrderService.getOrders(0, 10, "", "WALK_IN")).total).toBe(1);
+    expect((await OrderService.getSchedulingEntries(0, 10)).total).toBe(0);
+    expect((await UserService.getCustomers(0, 50)).rows.some((c) => c.email === "walkin@system.local")).toBe(false);
+    expect((await UserService.getUsers(0, 50)).rows.some((u) => u.email === "walkin@system.local")).toBe(false);
+    await rejected(() => OrderService.processOrder(sale.id, 1), "Walk-in orders");
+    await rejected(() => OrderService.deliveryOrder(sale.id, 1), "Walk-in orders");
+    await rejected(() => OrderService.cancelOrder(sale.id, 1), "walk-in orders");
+  });
+
+  function walkInDelivery(inventoryId: number, overrides: Record<string, unknown> = {}) {
+    return {
+      warehouse_id: 1, fulfillment: "DELIVERY" as const,
+      checkout_key: crypto.randomUUID(),
+      shipping_recipient: "Juan Delivery", shipping_phone: "09171234567",
+      shipping_address: "100 Customer Street", shipping_latitude: 14.5, shipping_longitude: 121.1,
+      payment_method: "CASH" as const, amount_tendered: 1234,
+      items: [{ inventory_id: inventoryId, quantity: 100 }], ...overrides,
+    };
+  }
+
+  test("walk-in vehicle delivery reserves a large paid order, dispatches once, and notifies the guest's order contact", async () => {
+    await seed();
+    await sql`insert into users (email,name,password_hash,role,created_at,updated_at) values ('driver@example.test','Driver','fixture','driver',0,0)`;
+    await sql`insert into drivers (user_id,warehouse_id,phone_number) values (4,1,'09000000000')`;
+    await sql`insert into vehicles (warehouse_id,plate_number,image,created_at,updated_at) values (1,'WALK-IN','',0,0)`;
+    const [item] = await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 150 });
+    const input = walkInDelivery(item.id);
+    const sales = await Promise.all([OrderService.createWalkInOrder(input, 1), OrderService.createWalkInOrder(input, 1)]);
+    expect(sales[0].id).toBe(sales[1].id);
+    expect((await sql`select quantity,reserved from inventory where id=${item.id}`)[0]).toMatchObject({ quantity: 150, reserved: 100 });
+    expect(await sql`select * from orders`).toHaveLength(1);
+    expect(await sql`select * from payments`).toHaveLength(1);
+    expect((await OrderService.getOrders(0, 10, "", "WALK_IN")).rows[0]).toMatchObject({ customer_name: "Juan Delivery", sales_channel: "WALK_IN", status: "SCHEDULING", delivery_type: "INTERNAL" });
+    expect((await OrderService.getSchedulingEntries(0, 10, "Juan Delivery")).total).toBe(1);
+    expect((await OrderService.getAllOrderForCombobox(0, 10, "Juan Delivery", 1)).rows[0]).toMatchObject({ customer_name: "Juan Delivery", customer_phone: "09171234567" });
+    expect(await InvoiceService.getInvoiceByOrderId(sales[0].id)).toMatchObject({ payment_status: "PAID", amount_paid: 1234, customer: { name: "Juan Delivery", phone: "09171234567", address: "100 Customer Street", email: null } });
+    const run = await DeliveryService.createDelivery({ order_ids: [sales[0].id], scheduled_date: "2099-01-01", scheduled_time: "09:00", delivery_type: "INTERNAL", driver_id: 4, vehicle_id: 1, delivery_allowance: 0, fuel: 0, toll: 0 });
+    const { DriverService } = require("../src/modules/driver/service");
+    expect((await DriverService.trip(4, run.id)).stops[0]).toMatchObject({ customer: "Juan Delivery", phone: "09171234567", address: "100 Customer Street", collectNow: "0.00" });
+    const { findOrderViews } = require("../src/modules/analysis-reports/repositories/orders.repository");
+    expect((await findOrderViews(undefined, Date.now()))[0]).toMatchObject({ customer: "Juan Delivery", salesChannel: "WALK_IN", paid: 1234 });
+    await DeliveryService.dispatchDelivery(run.id);
+    await DeliveryService.dispatchDelivery(run.id);
+    expect((await sql`select quantity,reserved from inventory where id=${item.id}`)[0]).toMatchObject({ quantity: 50, reserved: 0 });
+    const [stop] = await sql`select id from deliveries_stops where delivery_id=${run.id}`;
+    await DeliveryService.markStopDelivered(stop.id);
+    await DeliveryService.markStopDelivered(stop.id);
+    expect((await OrderService.getOrderById(sales[0].id))!.status).toBe("COMPLETED");
+    expect(await sql`select * from payments`).toHaveLength(1);
+    expect((await sql`select recipient from delivery_notifications where channel='sms'`)[0].recipient).toBe("09171234567");
+    expect((await sql`select status from delivery_notifications where channel='email'`)[0].status).toBe("skipped");
+    expect((await OrderService.createWalkInOrder(input, 1)).id).toBe(sales[0].id);
+    expect((await sql`select quantity,reserved from inventory where id=${item.id}`)[0]).toMatchObject({ quantity: 50, reserved: 0 });
+    await expect(OrderService.createWalkInOrder({ ...input, shipping_phone: "09999999999" }, 1)).rejects.toThrow("already been paid");
+  });
+
+  test("walk-in delivery validates contact, destination, ownership, payment and stock atomically", async () => {
+    await seed();
+    const [item] = await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 150 });
+    for (const override of [
+      { shipping_recipient: " " }, { shipping_phone: "" }, { shipping_phone: "abcdefg" },
+      { shipping_address: " " }, { shipping_latitude: 0, shipping_longitude: 0 },
+      { shipping_latitude: 100 }, { amount_tendered: 1 },
+      { items: [{ inventory_id: item.id, quantity: 151 }] },
+      { customer_address_id: 1 }, { customer_id: 1, customer_address_id: 999 },
+    ]) {
+      let failed = false;
+      try { await OrderService.createWalkInOrder(walkInDelivery(item.id, override), 1); }
+      catch { failed = true; }
+      expect(failed).toBe(true);
+    }
+    expect(await sql`select * from orders`).toHaveLength(0);
+    expect(await sql`select * from payments`).toHaveLength(0);
+    expect(await sql`select * from invoices`).toHaveLength(0);
+    expect((await sql`select quantity,reserved from inventory where id=${item.id}`)[0]).toMatchObject({ quantity: 150, reserved: 0 });
+  });
+
+  test("walk-in registered delivery uses an owned saved destination and cancellation releases only reserved stock", async () => {
+    await seed();
+    const [item] = await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 150 });
+    const sale = await OrderService.createWalkInOrder(walkInDelivery(item.id, { customer_id: 1, customer_address_id: 1, shipping_address: "Ignored client address", shipping_latitude: 0, shipping_longitude: 0 }), 1);
+    const detail = await OrderService.getOrderById(sale.id);
+    if (!detail) throw new Error("Missing walk-in delivery");
+    expect(detail.shipping_address).toContain("123 Test St");
+    expect(Number(detail.shipping_latitude)).toBe(14.5);
+    await OrderService.cancelOrder(sale.id, detail.version);
+    expect((await sql`select quantity,reserved from inventory where id=${item.id}`)[0]).toMatchObject({ quantity: 150, reserved: 0 });
+    expect((await sql`select payment_status from payments where order_id=${sale.id}`)[0].payment_status).toBe("PAID");
+    const [payment] = await sql`select payment_number,version from payments where order_id=${sale.id}`;
+    await PaymentService.refund({ payment_number: payment.payment_number, version: payment.version, amount: 1234, reason: "Cancelled delivery", request_id: crypto.randomUUID() }, 1);
+    expect((await sql`select quantity,reserved from inventory where id=${item.id}`)[0]).toMatchObject({ quantity: 150, reserved: 0 });
+    expect((await InvoiceService.getInvoiceByOrderId(sale.id)).amount_paid).toBe(0);
+  });
+
+  test("walk-in guest destinations remain isolated on a shared system customer", async () => {
+    await seed();
+    const [item] = await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 250 });
+    const first = await OrderService.createWalkInOrder(walkInDelivery(item.id), 1);
+    const second = await OrderService.createWalkInOrder(walkInDelivery(item.id, { shipping_recipient: "Maria", shipping_phone: "09999999999", shipping_address: "200 Another Street" }), 1);
+    expect((await InvoiceService.getInvoiceByOrderId(first.id)).customer).toMatchObject({ name: "Juan Delivery", phone: "09171234567", address: "100 Customer Street" });
+    expect((await InvoiceService.getInvoiceByOrderId(second.id)).customer).toMatchObject({ name: "Maria", phone: "09999999999", address: "200 Another Street" });
+    const [profile] = await sql`select u.name,c.phone_number from users u join customers c on c.user_id=u.id where u.email='walkin@system.local'`;
+    expect(profile).toMatchObject({ name: "Walk-in Customer", phone_number: "N/A" });
+    expect((await sql`select quantity,reserved from inventory where id=${item.id}`)[0]).toMatchObject({ quantity: 250, reserved: 200 });
+  });
+
 });

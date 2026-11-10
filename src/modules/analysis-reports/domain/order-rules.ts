@@ -20,6 +20,7 @@ export const RECEIVED_PAYMENT_STATUSES = [
 ] as const;
 
 export interface OrderRaw {
+  salesChannel?: string;
   id: number;
   number: string;
   createdAt: Date;
@@ -124,6 +125,7 @@ export function buildOrderViews(
             ? "PARTIALLY_PAID"
             : "UNPAID";
     return {
+      salesChannel: o.salesChannel === "WALK_IN" ? "WALK_IN" : "STANDARD",
       id: o.id,
       number: o.number,
       at,

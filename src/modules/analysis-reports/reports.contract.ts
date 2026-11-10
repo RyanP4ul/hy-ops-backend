@@ -68,6 +68,7 @@ export interface Opt { value: string; label: string }
 export type Delta = number | null;
 
 export interface OrderRow {
+  salesChannel?: "STANDARD" | "WALK_IN";
   id: number; number: string; at: number; customerId: number; customer: string; warehouse: string; itemCount: number;
   total: number | null; paid: number; balance: number | null; arrangement: PaymentArrangement; dueAt: number | null;
   payStatus: PaymentStatus; status: OrderStatus;

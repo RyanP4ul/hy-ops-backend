@@ -69,6 +69,10 @@ export const orders = pgTable("orders", {
   order_group_position: integer("order_group_position"),
   notes: text("notes"),
   stock_reserved: boolean("stock_reserved").notNull().default(false),
+  sales_channel: varchar("sales_channel", { length: 16 }).notNull().default("STANDARD"),
+  walk_in_checkout_key: varchar("walk_in_checkout_key", { length: 36 }).unique(),
+  walk_in_checkout_fingerprint: text("walk_in_checkout_fingerprint"),
+  walk_in_amount_tendered: numeric("walk_in_amount_tendered", { precision: 20, scale: 2 }),
   delivery_method: varchar("delivery_method", { length: 16 }),
   lalamove_pickup_warehouse_id: integer().references(() => warehouses.id, { onDelete: "restrict" }),
   status: order_status("status").notNull().default("PENDING"),
@@ -86,7 +90,8 @@ export const orders = pgTable("orders", {
   updated_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("orders_group_index").on(table.order_group_id),
-  check("orders_delivery_method_valid", sql`${table.delivery_method} in ('INTERNAL', 'LALAMOVE', 'PICKUP')`),
+  check("orders_sales_channel_valid", sql`${table.sales_channel} in ('STANDARD', 'WALK_IN')`),
+  check("orders_delivery_method_valid", sql`${table.delivery_method} in ('INTERNAL', 'LALAMOVE', 'PICKUP', 'WALK_IN')`),
   unique("orders_group_position_unique").on(table.order_group_id, table.order_group_position),
 ]);
 

@@ -21,9 +21,13 @@ export abstract class InvoiceService {
         issue_date: invoices.issue_date,
         order_status: orders.status,
         order_notes: orders.notes,
+        delivery_method: orders.delivery_method,
+        sales_channel: orders.sales_channel,
+        shipping_recipient: orders.shipping_recipient,
+        shipping_phone: orders.shipping_phone,
         payment_arrangement: orders.payment_arrangement,
         customer_name: users.name,
-        customer_email: users.email,
+        customer_email: sql<string | null>`nullif(${users.email}, 'walkin@system.local')`,
         company_name: customers.company_name,
         phone_number: customers.phone_number,
         payment_method: invoice_payments.payment_method,
@@ -95,6 +99,8 @@ export abstract class InvoiceService {
       dueDate.setDate(dueDate.getDate() + 30);
     }
 
+    const isWalkIn = invoice.sales_channel === "WALK_IN";
+
     return {
       invoice_number: invoice.invoice_number,
       status: invoice.status,
@@ -105,13 +111,21 @@ export abstract class InvoiceService {
       payment_type: invoice.payment_type,
       payment_status: paymentStatus,
       amount_paid: amountPaid,
+      delivery_type: invoice.delivery_method,
+      sales_channel: invoice.sales_channel,
       combined_payment: await getOrderCombinedPayment(order_id),
       customer: {
-        name: invoice.customer_name,
-        company_name: invoice.company_name,
+        name:
+          isWalkIn && invoice.shipping_recipient?.trim()
+            ? invoice.shipping_recipient.trim()
+            : invoice.customer_name,
+        company_name: isWalkIn && invoice.customer_email === null ? undefined : invoice.company_name,
         address: invoice.full_address,
         email: invoice.customer_email,
-        phone: invoice.phone_number,
+        phone:
+          isWalkIn && invoice.shipping_phone?.trim()
+            ? invoice.shipping_phone.trim()
+            : invoice.phone_number,
       },
       items: items.map((item) => ({
         id: item.id,

@@ -31,13 +31,14 @@ export async function queueDeliveryNotifications(
       email: users.email,
       phone: customers.phone_number,
       shippingPhone: orders.shipping_phone,
+      salesChannel: orders.sales_channel,
     })
     .from(orders)
     .innerJoin(customers, eq(customers.id, orders.customer_id))
     .innerJoin(users, eq(users.id, customers.user_id))
     .where(eq(orders.id, orderId));
-  const phone = contact?.phone?.trim() || contact?.shippingPhone?.trim();
-  const email = contact?.email?.trim();
+  const phone = contact?.salesChannel === "WALK_IN" ? contact.shippingPhone?.trim() : contact?.phone?.trim() || contact?.shippingPhone?.trim();
+  const email = contact?.email === "walkin@system.local" ? undefined : contact?.email?.trim();
   await tx
     .insert(delivery_notifications)
     .values([

@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { WorkflowError } from "../../utils/workflow-error";
 import { stockTransaction, type StockTransaction } from "../inventory/transaction";
-import type { CreateOrderInput, OrderBatchInput } from "./model";
+import type { CreateOrderInput, OrderBatchInput, WalkInOrderInput } from "./model";
 import { allocatePayment } from "../../utils/payment-allocation";
 import { coordinates } from "../../utils/coordinates";
 import { changeOrderStock } from "./stock";
@@ -20,7 +21,7 @@ import {
   users,
   warehouses,
 } from "@/db/schema";
-import { order_items, OrderInsert, orders, order_groups } from "@/db/schema/order";
+import { order_items, orders, order_groups } from "@/db/schema/order";
 import {
   and,
   asc,
@@ -29,8 +30,6 @@ import {
   eq,
   ilike,
   inArray,
-  ne,
-  notInArray,
   or,
   sql,
 } from "drizzle-orm";
@@ -41,16 +40,20 @@ import { InvoiceService } from "../invoice/service";
 import { invoices } from "@/db/schema/invoice";
 import { minorUnitsToMoney, moneyToMinorUnits } from "../../utils/money";
 
+export const WALK_IN_SYSTEM_EMAIL = "walkin@system.local";
+
 const orderGroupFields = {
   order_group_id: orders.order_group_id,
   order_group_position: orders.order_group_position,
   order_group_number: sql<string | null>`(select group_number from order_groups where id = ${orders.order_group_id})`,
   order_group_size: sql<number>`(select count(*)::int from orders as members where members.order_group_id = ${orders.order_group_id})`.mapWith(Number),
 };
-const internalSchedulingEligible = sql`coalesce(${orders.delivery_method}, '') <> 'LALAMOVE'
+const internalSchedulingEligible = sql`coalesce(${orders.delivery_method}, '') not in ('LALAMOVE', 'WALK_IN')
   and not exists (select 1 from delivery_orders b where b.order_id = ${orders.id} and b.active)
   and not exists (select 1 from orders m where m.order_group_id = ${orders.order_group_id}
-    and (m.delivery_method = 'LALAMOVE' or exists (select 1 from delivery_orders b where b.order_id = m.id and b.active)))`;
+    and (m.delivery_method in ('LALAMOVE', 'WALK_IN') or exists (select 1 from delivery_orders b where b.order_id = m.id and b.active)))`;
+
+const resolvedCustomerNameSql = sql<string>`case when ${orders.sales_channel} = 'WALK_IN' and coalesce(nullif(trim(${orders.shipping_recipient}), ''), '') <> '' then ${orders.shipping_recipient} else ${users.name} end`;
 
 type SortField = "id" | "product_number" | "warehouse_name" | "customer_name" | "item_count" | "total";
 type SortOrder = "asc" | "desc";
@@ -120,6 +123,158 @@ function buildCustomerOrderEligibility(
 }
 
 export abstract class OrderService {
+  private static walkInConstraintEnsured = false;
+
+  private static async ensureWalkInConstraint(tx: StockTransaction) {
+    if (this.walkInConstraintEnsured) return;
+    const rows = await tx.execute<{ def: string }>(sql`
+      select pg_get_constraintdef(oid) as def
+      from pg_constraint
+      where conname = 'orders_delivery_method_valid'
+    `);
+    const def = rows[0]?.def;
+    if (def && !def.includes("WALK_IN")) {
+      await tx.execute(sql`alter table orders drop constraint orders_delivery_method_valid`);
+      await tx.execute(sql`alter table orders add constraint orders_delivery_method_valid check (delivery_method in ('INTERNAL', 'LALAMOVE', 'PICKUP', 'WALK_IN'))`);
+    }
+    this.walkInConstraintEnsured = true;
+  }
+
+  private static async getOrCreateWalkInCustomer(tx: StockTransaction) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    await tx
+      .insert(users)
+      .values({
+        email: WALK_IN_SYSTEM_EMAIL,
+        name: "Walk-in Customer",
+        password_hash: "!system-walk-in-disabled!",
+        role: "customer",
+        is_archived: false,
+        created_at: nowSec,
+        updated_at: nowSec,
+      })
+      .onConflictDoNothing({ target: users.email });
+
+    const [sysUser] = await tx
+      .select({ id: users.id, name: users.name })
+      .from(users)
+      .where(eq(users.email, WALK_IN_SYSTEM_EMAIL))
+      .for("update");
+    if (!sysUser) throw new WorkflowError("Failed to initialize system walk-in customer.");
+
+    const [existingCustomer] = await tx
+      .select({ id: customers.id, phone_number: customers.phone_number })
+      .from(customers)
+      .where(eq(customers.user_id, sysUser.id))
+      .for("update");
+
+    if (existingCustomer) {
+      return {
+        id: existingCustomer.id,
+        name: sysUser.name,
+        phone_number: existingCustomer.phone_number,
+      };
+    }
+
+    const [createdCustomer] = await tx
+      .insert(customers)
+      .values({
+        user_id: sysUser.id,
+        company_name: "Walk-in Counter",
+        phone_number: "N/A",
+      })
+      .returning({ id: customers.id, phone_number: customers.phone_number });
+
+    if (!createdCustomer) throw new WorkflowError("Failed to create system walk-in customer profile.");
+    return {
+      id: createdCustomer.id,
+      name: sysUser.name,
+      phone_number: createdCustomer.phone_number,
+    };
+  }
+
+  private static async insertOrderItemsWithPriceSnapshot(
+    tx: StockTransaction,
+    orderId: number,
+    items: { inventory_id: number; quantity: number }[],
+  ) {
+    const currentPrices = await tx
+      .select({
+        inventory_id: inventory.id,
+        price: product_variants.price,
+      })
+      .from(inventory)
+      .innerJoin(
+        product_variants,
+        eq(inventory.product_variant_id, product_variants.id),
+      )
+      .where(
+        inArray(
+          inventory.id,
+          [...new Set(items.map((item) => item.inventory_id))],
+        ),
+      )
+      .orderBy(asc(inventory.id))
+      .for("update");
+    const priceByInventory = new Map(
+      currentPrices.map((row) => [row.inventory_id, row.price]),
+    );
+
+    for (const item of items) {
+      const currentPrice = priceByInventory.get(item.inventory_id);
+      if (currentPrice === undefined) {
+        throw new WorkflowError(
+          `Inventory item ${item.inventory_id} is unavailable for this order.`,
+        );
+      }
+      const unitPriceSnapshot = minorUnitsToMoney(
+        moneyToMinorUnits(currentPrice),
+      );
+
+      const [order_item] = await tx
+        .select()
+        .from(order_items)
+        .where(
+          and(
+            eq(order_items.order_id, orderId),
+            eq(order_items.inventory_id, item.inventory_id),
+          ),
+        );
+
+      if (order_item) {
+        await tx
+          .update(order_items)
+          .set({
+            quantity: order_item.quantity + item.quantity,
+          })
+          .where(
+            and(
+              eq(order_items.order_id, orderId),
+              eq(order_items.inventory_id, item.inventory_id),
+            ),
+          );
+      } else {
+        await tx.insert(order_items).values({
+          order_id: orderId,
+          inventory_id: item.inventory_id,
+          quantity: item.quantity,
+          unit_price_snapshot: unitPriceSnapshot,
+          price_source: "checkout",
+        });
+      }
+    }
+  }
+
+  private static async computeOrderTotalMinor(tx: StockTransaction, orderId: number): Promise<bigint> {
+    const [orderTotal] = await tx
+      .select({
+        total: sql<string>`coalesce(sum(${order_items.quantity} * ${order_items.unit_price_snapshot}), 0)`,
+      })
+      .from(order_items)
+      .where(eq(order_items.order_id, orderId));
+    return moneyToMinorUnits(orderTotal?.total ?? "0");
+  }
+
   static async saveShippingAddress(customerId: number, data: import("./model").SavedShippingAddress) {
     const point = coordinates(data.latitude, data.longitude);
     if (!point) throw new WorkflowError("Confirm valid coordinates for this shipping address.");
@@ -170,7 +325,8 @@ export abstract class OrderService {
         id: orders.id,
         product_number: orders.order_number,
         ...orderGroupFields,
-        customer_name: users.name,
+        sales_channel: orders.sales_channel,
+        customer_name: resolvedCustomerNameSql,
         customer_company: customers.company_name,
         shipping_address: orders.shipping_address,
         status: orders.status,
@@ -222,8 +378,18 @@ export abstract class OrderService {
     const statuses = ["PENDING", "PROCESSING", "SCHEDULING", "SCHEDULED", "IN_TRANSIT", "COMPLETED", "CANCELLED"] as const;
     const validStatus = statuses.find((value) => value === status);
     const latestDeliveryType = sql<string>`coalesce(${orders.delivery_method}, (select ${deliveries.delivery_type}::text from ${deliveries_stops} inner join ${deliveries} on ${deliveries.id} = ${deliveries_stops.delivery_id} where ${deliveries_stops.order_id} = ${orders.id} order by ${deliveries.id} desc limit 1))`;
-    const whereQuery = and(or(ilike(users.name, `%${search}%`), ilike(orders.order_number, `%${search}%`), ilike(orderGroupFields.order_group_number, `%${search}%`), ilike(customers.company_name, `%${search}%`), ilike(orders.shipping_address, `%${search}%`)), validStatus ? eq(orders.status, validStatus) : undefined,
-      ["INTERNAL", "LALAMOVE", "PICKUP"].includes(delivery_type) ? sql`${latestDeliveryType} = ${delivery_type}` : undefined);
+    const whereQuery = and(
+      or(
+        ilike(users.name, `%${search}%`),
+        ilike(orders.shipping_recipient, `%${search}%`),
+        ilike(orders.order_number, `%${search}%`),
+        ilike(orderGroupFields.order_group_number, `%${search}%`),
+        ilike(customers.company_name, `%${search}%`),
+        ilike(orders.shipping_address, `%${search}%`),
+      ),
+      validStatus ? eq(orders.status, validStatus) : undefined,
+      delivery_type === "WALK_IN" ? eq(orders.sales_channel, "WALK_IN") : ["INTERNAL", "LALAMOVE", "PICKUP"].includes(delivery_type) ? sql`${latestDeliveryType} = ${delivery_type}` : undefined,
+    );
 
     const [total_result] = await db
       .select({ count: count() })
@@ -237,10 +403,11 @@ export abstract class OrderService {
         id: orders.id,
         product_number: orders.order_number,
         ...orderGroupFields,
+        sales_channel: orders.sales_channel,
         warehouse_id: orders.warehouse_id,
         warehouse_name: warehouses.name,
         delivery_type: latestDeliveryType,
-        customer_name: users.name,
+        customer_name: resolvedCustomerNameSql,
         email: users.email,
         customer_company: customers.company_name,
         shipping_address: orders.shipping_address,
@@ -302,6 +469,7 @@ export abstract class OrderService {
         id: orders.id,
         order_number: orders.order_number,
         ...orderGroupFields,
+        sales_channel: orders.sales_channel,
         warehouse_id: orders.warehouse_id,
         warehouse_name: warehouses.name,
         payment_arrangement: orders.payment_arrangement,
@@ -316,8 +484,7 @@ export abstract class OrderService {
         payment_type: sql<string | null>`(select ${payments.payment_type} from ${payments} where ${payments.order_id} = ${orders.id} order by ${payments.id} limit 1)`,
         amount_paid: sql<number>`coalesce((select sum(${payments.amount}) from ${payments} where ${payments.order_id} = ${orders.id}), 0)`.mapWith(Number),
         customer_id: orders.customer_id,
-        customer_name: users.name,
-        // description: orders.description,
+        customer_name: resolvedCustomerNameSql,
         status: orders.status,
         notes: orders.notes,
         version: orders.version,
@@ -367,8 +534,9 @@ export abstract class OrderService {
       id: orders.id,
       product_number: orders.order_number,
         ...orderGroupFields,
+        sales_channel: orders.sales_channel,
       warehouse_name: warehouses.name,
-      customer_name: users.name,
+      customer_name: resolvedCustomerNameSql,
       item_count: sql`(select count(*) from ${order_items} where ${order_items.order_id} = ${orders.id})`,
       total: sql`(select case when bool_and(${order_items.unit_price_snapshot} is not null) then sum(${order_items.quantity} * ${order_items.unit_price_snapshot}) else null end from ${order_items} where ${order_items.order_id} = ${orders.id})`,
     } as const;
@@ -384,6 +552,7 @@ export abstract class OrderService {
         id: orders.id,
         order_number: orders.order_number,
         ...orderGroupFields,
+        sales_channel: orders.sales_channel,
         customer_company: customers.company_name,
         shipping_address: orders.shipping_address,
         destination: orders.shipping_address,
@@ -415,6 +584,185 @@ export abstract class OrderService {
 
   static async createOrder(data: CreateOrderInput) {
     return stockTransaction(tx => this.createOrderInTransaction(tx, data));
+  }
+
+  static async createWalkInOrder(data: WalkInOrderInput, staffWarehouseId?: number) {
+    if (staffWarehouseId !== undefined && data.warehouse_id !== staffWarehouseId) {
+      throw new WorkflowError("Choose your assigned warehouse.", 403);
+    }
+    if (!data.items || data.items.length === 0) {
+      throw new WorkflowError("Order must have at least one item");
+    }
+    if (data.items.some((item) => !Number.isSafeInteger(item.quantity) || item.quantity <= 0)) {
+      throw new WorkflowError("Order quantities must be positive integers.");
+    }
+    if (data.payment_method !== "CASH" && !data.payment_type?.trim()) {
+      throw new WorkflowError("Select or enter a payment type.");
+    }
+
+    const isDelivery = data.fulfillment === "DELIVERY";
+    if (data.fulfillment && !["TAKEAWAY", "DELIVERY"].includes(data.fulfillment)) throw new WorkflowError("Choose a valid fulfillment option.");
+    if (data.checkout_key && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(data.checkout_key)) throw new WorkflowError("Invalid checkout key.");
+    const fingerprint = createHash("sha256").update(JSON.stringify({
+      ...Object.fromEntries(Object.entries(data).sort(([a], [b]) => a.localeCompare(b))),
+      items: data.items.map(item => ({ inventory_id: item.inventory_id, quantity: item.quantity })),
+    })).digest("hex");
+
+    return stockTransaction(async (tx) => {
+      // Serialize retries before any order, payment, or inventory mutation.
+      if (data.checkout_key) {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${data.checkout_key}, 0))`);
+        const [existing] = await tx.select().from(orders).where(eq(orders.walk_in_checkout_key, data.checkout_key));
+        if (existing) {
+          if (existing.walk_in_checkout_fingerprint !== fingerprint) throw new WorkflowError("This checkout has already been paid with different details. Review the existing order before starting another sale.", 409);
+          const total = await this.computeOrderTotalMinor(tx, existing.id);
+          const tendered = moneyToMinorUnits(existing.walk_in_amount_tendered!);
+          return { id: existing.id, order_number: existing.order_number,
+            total: Number(minorUnitsToMoney(total)), amount_tendered: Number(minorUnitsToMoney(tendered)),
+            change_due: Number(minorUnitsToMoney(tendered - total)),
+            message: existing.delivery_method === "INTERNAL" ? "Paid - awaiting delivery scheduling." : `Walk-in order ${existing.order_number} completed.` };
+        }
+      }
+      await this.ensureWalkInConstraint(tx);
+
+      const [warehouse] = await tx
+        .select({ id: warehouses.id, name: warehouses.name })
+        .from(warehouses)
+        .where(and(eq(warehouses.id, data.warehouse_id), eq(warehouses.is_archived, false)))
+        .for("share");
+      if (!warehouse) throw new WorkflowError("Choose an active warehouse.");
+
+      let customerRow: { id: number; name: string; phone_number: string };
+      if (data.customer_id !== undefined && data.customer_id > 0) {
+        const [found] = await tx
+          .select({
+            id: customers.id,
+            name: users.name,
+            phone_number: customers.phone_number,
+          })
+          .from(customers)
+          .innerJoin(users, eq(users.id, customers.user_id))
+          .where(and(eq(customers.id, data.customer_id), eq(users.is_archived, false)))
+          .for("update", { of: customers });
+        if (!found) throw new WorkflowError("Customer not found.");
+        customerRow = found;
+      } else {
+        customerRow = await this.getOrCreateWalkInCustomer(tx);
+      }
+
+      const recipient = data.walk_in_name?.trim() || customerRow.name.trim() || "Walk-in Customer";
+      const phone = data.walk_in_phone?.trim() || customerRow.phone_number.trim() || "N/A";
+      const counterAddress = `Walk-in Counter (${warehouse.name})`;
+      let destination = coordinates(data.shipping_latitude, data.shipping_longitude);
+      let shippingAddress = data.shipping_address?.trim();
+      if (isDelivery && data.customer_address_id) {
+        if (!data.customer_id) throw new WorkflowError("Choose a registered customer for a saved address.");
+        const [address] = await tx.select().from(customer_addresses).where(and(
+          eq(customer_addresses.id, data.customer_address_id), eq(customer_addresses.customer_id, data.customer_id),
+        )).for("share");
+        if (!address) throw new WorkflowError("Choose an address belonging to this customer.");
+        shippingAddress = formatShippingAddress(address);
+        destination = coordinates(address.latitude, address.longitude);
+      }
+      if (isDelivery) {
+        if (!data.shipping_recipient?.trim() || !data.shipping_phone?.trim() || !shippingAddress) throw new WorkflowError("Delivery requires the customer's name, phone number, and address.");
+        if (!/^[+()\d\s.-]{7,20}$/.test(data.shipping_phone.trim()) || data.shipping_phone.replace(/\D/g, "").length < 7) throw new WorkflowError("Enter a valid delivery phone number.");
+        if (!destination) throw new WorkflowError("Confirm a valid delivery latitude and longitude; (0, 0) is not a verified destination.");
+      }
+
+      const [new_order] = await tx
+        .insert(orders)
+        .values({
+          order_number: `DRAFT-${crypto.randomUUID().slice(0, 24)}`,
+          warehouse_id: data.warehouse_id,
+          customer_id: customerRow.id,
+          payment_arrangement: "FULLY_PAID",
+          notes: data.notes?.trim() || "",
+          sales_channel: "WALK_IN",
+          walk_in_checkout_key: data.checkout_key ?? null,
+          walk_in_checkout_fingerprint: fingerprint,
+          walk_in_amount_tendered: minorUnitsToMoney(moneyToMinorUnits(data.amount_tendered)),
+          delivery_method: isDelivery ? "INTERNAL" : "WALK_IN",
+          status: isDelivery ? "SCHEDULING" : "COMPLETED",
+          shipping_recipient: isDelivery ? data.shipping_recipient!.trim() : recipient,
+          shipping_phone: isDelivery ? data.shipping_phone!.trim() : phone,
+          shipping_address: isDelivery ? shippingAddress! : counterAddress,
+          shipping_latitude: isDelivery ? destination!.latitude : null,
+          shipping_longitude: isDelivery ? destination!.longitude : null,
+          shipping_address_source_id: isDelivery ? data.customer_address_id ?? null : null,
+        })
+        .returning({ id: orders.id });
+
+      if (!new_order) {
+        throw new WorkflowError("Failed to create walk-in order");
+      }
+
+      const order_number = `ORD-${String(new_order.id).padStart(6, "0")}`;
+      await tx
+        .update(orders)
+        .set({ order_number })
+        .where(eq(orders.id, new_order.id));
+
+      await this.insertOrderItemsWithPriceSnapshot(tx, new_order.id, data.items);
+
+      await changeOrderStock(tx, new_order.id, data.warehouse_id, "reserve");
+      if (!isDelivery) await changeOrderStock(tx, new_order.id, data.warehouse_id, "consume");
+
+      const totalMinor = await this.computeOrderTotalMinor(tx, new_order.id);
+      let tenderedMinor: bigint;
+      try {
+        tenderedMinor = moneyToMinorUnits(data.amount_tendered);
+      } catch {
+        throw new WorkflowError("Amount tendered must be a valid monetary amount.");
+      }
+
+      if (tenderedMinor < totalMinor) {
+        throw new WorkflowError("Amount tendered must be at least the order total.");
+      }
+      if (data.payment_method !== "CASH" && tenderedMinor !== totalMinor) {
+        throw new WorkflowError("Non-cash walk-in payments must match the exact order total.");
+      }
+
+      const changeMinor = tenderedMinor - totalMinor;
+      const nowDate = new Date();
+
+      const payment = await PaymentService.createPayment(tx, {
+        payment_number: `PAY-${String(new_order.id).padStart(6, "0")}`,
+        order_id: new_order.id,
+        customer_id: customerRow.id,
+        payment_method: data.payment_method as PaymentMethodType,
+        payment_type: data.payment_method === "CASH" ? null : data.payment_type?.trim() || null,
+        amount: minorUnitsToMoney(totalMinor),
+        payment_status: "PAID",
+        received_at: nowDate,
+      });
+
+      const invoice = await InvoiceService.createInvoice(
+        tx,
+        new_order.id,
+        customerRow.id,
+        data.payment_method,
+        data.items,
+      );
+      if (!invoice) {
+        throw new WorkflowError("Failed to create invoice");
+      }
+
+      await tx
+        .update(invoices)
+        .set({ status: "ISSUED", issue_date: nowDate })
+        .where(eq(invoices.order_id, new_order.id));
+
+      return {
+        id: new_order.id,
+        order_number,
+        payment_id: payment.id,
+        total: Number(minorUnitsToMoney(totalMinor)),
+        amount_tendered: Number(minorUnitsToMoney(tenderedMinor)),
+        change_due: Number(minorUnitsToMoney(changeMinor)),
+        message: isDelivery ? "Paid - awaiting delivery scheduling." : `Walk-in order ${order_number} completed.`,
+      };
+    });
   }
 
   static async createOrders(data: OrderBatchInput) {
@@ -592,83 +940,12 @@ export abstract class OrderService {
       .set({ order_number: order_number })
       .where(eq(orders.id, new_order.id));
 
-    const currentPrices = await tx
-      .select({
-        inventory_id: inventory.id,
-        price: product_variants.price,
-      })
-      .from(inventory)
-      .innerJoin(
-        product_variants,
-        eq(inventory.product_variant_id, product_variants.id),
-      )
-      .where(
-        inArray(
-          inventory.id,
-          [...new Set(data.items.map((item) => item.inventory_id))],
-        ),
-      )
-      .orderBy(asc(inventory.id))
-      .for("update");
-    const priceByInventory = new Map(
-      currentPrices.map((row) => [row.inventory_id, row.price]),
-    );
-
-    for (const item of data.items) {
-      const currentPrice = priceByInventory.get(item.inventory_id);
-      if (currentPrice === undefined) {
-        throw new WorkflowError(
-          `Inventory item ${item.inventory_id} is unavailable for this order.`,
-        );
-      }
-      const unitPriceSnapshot = minorUnitsToMoney(
-        moneyToMinorUnits(currentPrice),
-      );
-
-      const [order_item] = await tx
-        .select()
-        .from(order_items)
-        .where(
-          and(
-            eq(order_items.order_id, new_order.id),
-            eq(order_items.inventory_id, item.inventory_id),
-          ),
-        );
-
-      if (order_item) {
-        await tx
-          .update(order_items)
-          .set({
-            quantity: order_item.quantity + item.quantity,
-          })
-          .where(
-            and(
-              eq(order_items.order_id, new_order.id),
-              eq(order_items.inventory_id, item.inventory_id),
-            ),
-          );
-      } else {
-        await tx.insert(order_items).values({
-          order_id: new_order.id,
-          inventory_id: item.inventory_id,
-          quantity: item.quantity,
-          unit_price_snapshot: unitPriceSnapshot,
-          price_source: "checkout",
-        });
-      }
-    }
+    await this.insertOrderItemsWithPriceSnapshot(tx, new_order.id, data.items);
 
     await changeOrderStock(tx, new_order.id, data.warehouse_id, "reserve");
 
-    const [orderTotal] = await tx
-      .select({
-        total: sql<string>`coalesce(sum(${order_items.quantity} * ${order_items.unit_price_snapshot}), 0)`,
-      })
-      .from(order_items)
-      .where(eq(order_items.order_id, new_order.id));
-
+    const totalMinor = await this.computeOrderTotalMinor(tx, new_order.id);
     const amountPaidMinor = moneyToMinorUnits(data.amount_paid);
-    const totalMinor = moneyToMinorUnits(orderTotal?.total ?? "0");
 
     if (amountPaidMinor < 0n || amountPaidMinor > totalMinor) {
       throw new WorkflowError("Amount paid must be valid and cannot exceed the order total.");
@@ -724,6 +1001,10 @@ export abstract class OrderService {
         throw new WorkflowError("Order not found");
       }
 
+      if (order.delivery_method === "WALK_IN") {
+        throw new WorkflowError("Walk-in orders are completed at the counter and do not require processing.");
+      }
+
       if (order.status !== "PENDING") {
         throw new WorkflowError("Order is not pending");
       }
@@ -749,6 +1030,10 @@ export abstract class OrderService {
 
       if (!order) {
         throw new WorkflowError("Order not found");
+      }
+
+      if (order.delivery_method === "WALK_IN") {
+        throw new WorkflowError("Walk-in orders are completed at the counter and cannot be scheduled for delivery.");
       }
 
       if (order.status !== "PROCESSING") {
@@ -783,8 +1068,19 @@ export abstract class OrderService {
         throw new WorkflowError("Order not found");
       }
 
-      if (["PENDING", "PROCESSING"].indexOf(order.status) === -1) {
-        throw new WorkflowError("Only pending and processing orders can be cancelled");
+      if (order.delivery_method === "WALK_IN") {
+        throw new WorkflowError("Completed walk-in orders cannot be cancelled. Use returns or payment refunds instead.");
+      }
+
+      const unscheduledWalkInDelivery = order.sales_channel === "WALK_IN" && order.delivery_method === "INTERNAL" && order.status === "SCHEDULING";
+      if (!["PENDING", "PROCESSING"].includes(order.status) && !unscheduledWalkInDelivery) {
+        throw new WorkflowError("Only pending, processing, or unscheduled walk-in delivery orders can be cancelled");
+      }
+      if (unscheduledWalkInDelivery) {
+        const [assigned] = await tx.select({ id: deliveries_stops.id }).from(deliveries_stops)
+          .innerJoin(deliveries, eq(deliveries.id, deliveries_stops.delivery_id))
+          .where(and(eq(deliveries_stops.order_id, orderId), sql`${deliveries.status} <> 'cancelled'`)).limit(1);
+        if (assigned) throw new WorkflowError("Cancel the delivery assignment before cancelling this order.");
       }
 
       await assertNoExternalClaim(tx, orderId);
@@ -815,6 +1111,7 @@ export abstract class OrderService {
     return db.transaction(async (tx) => {
       const [order] = await tx.select().from(orders).where(eq(orders.id, orderId)).for("update");
       if (!order || order.version !== version) throw new WorkflowError("Order changed. Refresh and try again.");
+      if (order.delivery_method === "WALK_IN") throw new WorkflowError("Walk-in orders do not have a shipping destination.");
       if (!["PENDING", "PROCESSING", "SCHEDULING"].includes(order.status)) throw new WorkflowError("Destination can only be confirmed before scheduling.");
       await assertNoExternalClaim(tx, orderId);
       await tx.update(orders).set({ shipping_latitude: point.latitude, shipping_longitude: point.longitude, version: order.version + 1, updated_at: new Date() }).where(eq(orders.id, orderId));
@@ -824,6 +1121,7 @@ export abstract class OrderService {
 
   static async getReadyOrderGroup(groupId: string, warehouseId: number) {
     const members = await db.select({ id: orders.id, warehouse_id: orders.warehouse_id, status: orders.status, delivery_method: orders.delivery_method, ...orderGroupFields,
+        sales_channel: orders.sales_channel,
       order_number: orders.order_number, shipping_address: orders.shipping_address,
       shipping_latitude: orders.shipping_latitude, shipping_longitude: orders.shipping_longitude,
     }).from(orders).where(eq(orders.order_group_id, groupId)).orderBy(asc(orders.order_group_position));
@@ -831,6 +1129,7 @@ export abstract class OrderService {
     if (members.some(row => row.warehouse_id !== warehouseId)) throw new WorkflowError("All orders in this group must belong to the selected warehouse.");
     if (members.some(row => row.status !== "SCHEDULING")) throw new WorkflowError("All orders in this group must have Scheduling status before the group can be scheduled.");
     if (members.some(row => row.delivery_method === "LALAMOVE")) throw new WorkflowError("This group includes Lalamove orders. Book each external order separately.");
+    if (members.some(row => row.delivery_method === "WALK_IN")) throw new WorkflowError("Walk-in orders cannot be scheduled for delivery.");
     for (const member of members) await assertNoExternalClaim(db, member.id);
     return { rows: members, total_members: members.length, group_number: members[0]!.order_group_number };
   }
@@ -842,7 +1141,7 @@ export abstract class OrderService {
     const match = `%${search.trim()}%`;
     const predicate = and(eq(orders.status, "SCHEDULING"), internalSchedulingEligible,
       warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId),
-      search.trim() ? or(ilike(users.name, match), ilike(customers.company_name, match),
+      search.trim() ? or(ilike(resolvedCustomerNameSql, match), ilike(customers.company_name, match),
         ilike(orders.order_number, match), ilike(orders.shipping_address, match), ilike(orderGroupFields.order_group_number, match),
         sql`exists (select 1 from orders member where member.order_group_id = ${orders.order_group_id}
           and (member.order_number ilike ${match} or member.shipping_address ilike ${match})
@@ -856,7 +1155,8 @@ export abstract class OrderService {
     const groupIds = entries.flatMap(entry => entry.group_id ? [entry.group_id] : []);
     const singleIds = entries.filter(entry => !entry.group_id).map(entry => entry.id);
     const members = await db.select({ id: orders.id, warehouse_id: orders.warehouse_id, order_number: orders.order_number,
-      ...orderGroupFields, customer_name: users.name, customer_company: customers.company_name,
+      ...orderGroupFields,
+        sales_channel: orders.sales_channel, customer_name: resolvedCustomerNameSql, customer_company: customers.company_name,
       payment_arrangement: orders.payment_arrangement, status: orders.status, shipping_address: orders.shipping_address,
       shipping_latitude: orders.shipping_latitude, shipping_longitude: orders.shipping_longitude, version: orders.version,
     }).from(orders).leftJoin(customers, eq(customers.id, orders.customer_id)).leftJoin(users, eq(users.id, customers.user_id))
@@ -888,7 +1188,7 @@ export abstract class OrderService {
   ) {
     const offset = Math.max(page * limit, 0);
 
-    const whereQuery = or(ilike(users.name, `%${search}%`), ilike(orders.order_number, `%${search}%`), ilike(orderGroupFields.order_group_number, `%${search}%`));
+    const whereQuery = or(ilike(resolvedCustomerNameSql, `%${search}%`), ilike(orders.order_number, `%${search}%`), ilike(orderGroupFields.order_group_number, `%${search}%`));
 
     const [total_result] = await db
       .select({ count: count() })
@@ -903,12 +1203,13 @@ export abstract class OrderService {
         warehouse_id: orders.warehouse_id,
         order_number: orders.order_number,
         ...orderGroupFields,
-        customer_name: users.name,
+        sales_channel: orders.sales_channel,
+        customer_name: resolvedCustomerNameSql,
         customer_company: customers.company_name,
         payment_arrangement: orders.payment_arrangement,
         status: orders.status,
         customer_address: orders.shipping_address,
-        customer_phone: customers.phone_number,
+        customer_phone: sql<string>`case when ${orders.sales_channel} = 'WALK_IN' then ${orders.shipping_phone} else ${customers.phone_number} end`,
         shipping_recipient: orders.shipping_recipient,
         shipping_phone: orders.shipping_phone,
         shipping_address: orders.shipping_address,
@@ -937,7 +1238,7 @@ export abstract class OrderService {
       eq(orders.status, "SCHEDULING"),
       internalSchedulingEligible,
       warehouse_id > 0 ? eq(orders.warehouse_id, warehouse_id) : undefined,
-      search.trim() ? or(ilike(users.name, `%${search.trim()}%`), ilike(orders.order_number, `%${search.trim()}%`), ilike(orderGroupFields.order_group_number, `%${search.trim()}%`)) : undefined,
+      search.trim() ? or(ilike(resolvedCustomerNameSql, `%${search.trim()}%`), ilike(orders.order_number, `%${search.trim()}%`), ilike(orderGroupFields.order_group_number, `%${search.trim()}%`)) : undefined,
     );
     const [total] = await db.select({ count: count() }).from(orders)
       .leftJoin(customers, eq(orders.customer_id, customers.id))
@@ -945,9 +1246,10 @@ export abstract class OrderService {
     const rows = await db.select({
       id: orders.id, order_number: orders.order_number,
         ...orderGroupFields,
-      customer_name: users.name, customer_company: customers.company_name,
+        sales_channel: orders.sales_channel,
+      customer_name: resolvedCustomerNameSql, customer_company: customers.company_name,
       payment_arrangement: orders.payment_arrangement, status: orders.status,
-      customer_address: orders.shipping_address, customer_phone: customers.phone_number,
+      customer_address: orders.shipping_address, customer_phone: sql<string>`case when ${orders.sales_channel} = 'WALK_IN' then ${orders.shipping_phone} else ${customers.phone_number} end`,
       shipping_recipient: orders.shipping_recipient, shipping_phone: orders.shipping_phone,
       shipping_address: orders.shipping_address, shipping_latitude: orders.shipping_latitude,
       shipping_longitude: orders.shipping_longitude, version: orders.version,
