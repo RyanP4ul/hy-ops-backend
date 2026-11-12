@@ -20,7 +20,7 @@ try {
   await sql`insert into customers(user_id,company_name,phone_number) values (4,'Live customer','09000000000')`;
   await sql`insert into customer_addresses(customer_id,address_line,barangay,city_municipality,province,latitude,longitude) values (1,'Fixture street','Fixture barangay','Fixture city','Fixture province','14.6','121.2')`;
   await sql`insert into drivers(user_id,warehouse_id,phone_number) values (5,1,'09000000000')`;
-  await sql`insert into vehicles(warehouse_id,plate_number,image,created_at,updated_at) values (1,'LIVE-001','',0,0)`;
+  await sql`insert into vehicles(warehouse_id,plate_number,created_at,updated_at) values (1,'LIVE-001',0,0)`;
   await sql`insert into products(name) values ('Live product')`;
   await sql`insert into product_variants(product_id,name,sku,price,unit) values (1,'Live variant','LIVE-SKU',12.34,'piece')`;
   await sql`insert into inventory(warehouse_id,product_id,product_variant_id,quantity,created_at,updated_at) values (1,1,1,10000,0,0)`;

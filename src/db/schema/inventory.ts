@@ -1,6 +1,7 @@
 import {
   check,
   index,
+  boolean,
   integer,
   pgTable,
   text,
@@ -34,6 +35,9 @@ export const inventory = pgTable(
       }),
     quantity: integer().notNull(),
     reserved: integer().notNull().default(0),
+    is_archived: boolean().notNull().default(false),
+    archived_at: integer(),
+    is_active: boolean().notNull().default(true),
     version: integer().notNull().default(1),
     created_at: integer().notNull(),
     updated_at: integer().notNull(),

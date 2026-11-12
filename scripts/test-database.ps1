@@ -1,4 +1,4 @@
-param([ValidateSet('Database', 'Driver', 'Live', 'Mobile', 'Backup', 'Realtime', 'Lalamove')][string]$Suite = 'Database', [ValidateSet('All', 'Selected', 'DashboardReports', 'Orders', 'Deliveries', 'UIUX', 'Operations', 'Authorization', 'Driver')][string]$BrowserScope = 'All', [string]$BrowserFilter = '')
+param([ValidateSet('Database', 'Driver', 'Sync', 'Live', 'Mobile', 'Backup', 'Realtime', 'Lalamove', 'Lifecycle', 'LifecycleRegression', 'Retention', 'RetentionBrowser')][string]$Suite = 'Database', [ValidateSet('All', 'Selected', 'DashboardReports', 'Orders', 'Deliveries', 'UIUX', 'Operations', 'Authorization', 'Driver')][string]$BrowserScope = 'All', [string]$BrowserFilter = '')
 $ErrorActionPreference = 'Stop'
 $backendRoot = Split-Path -Parent $PSScriptRoot
 function Get-FixtureMigration([string]$Name) {
@@ -40,6 +40,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Fixture schema creation failed.' }
   # Reconstruct only the columns/tables changed by the incremental migrations.
   # The target is always the new, empty loopback fixture created above.
+  if ($Suite -notin @('Sync', 'Lifecycle', 'LifecycleRegression', 'Retention', 'RetentionBrowser')) {
   $legacyPath = Join-Path $fixtureRoot 'legacy-columns.sql'
   @'
 DROP TABLE payment_group_allocations;
@@ -81,8 +82,42 @@ ALTER TABLE orders ADD CONSTRAINT orders_warehouse_id_users_id_fk FOREIGN KEY (w
   if ($LASTEXITCODE -ne 0) { throw 'Lalamove migration failed.' }
   & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Get-FixtureMigration '0001_cuddly_chronomancer.sql')
   if ($LASTEXITCODE -ne 0) { throw 'Warehouse pickup migration failed.' }
+  }
+  if ($Suite -in @('Lifecycle', 'LifecycleRegression', 'Retention', 'RetentionBrowser')) {
+    # Verify the incremental migration against pre-retention columns in the fixture.
+    $lifecycleLegacyPath = Join-Path $fixtureRoot 'pre-retention.sql'
+    @'
+ALTER TABLE products DROP COLUMN is_archived, DROP COLUMN archived_at;
+ALTER TABLE inventory DROP COLUMN is_archived, DROP COLUMN archived_at;
+ALTER TABLE archives DROP CONSTRAINT archives_retention_valid;
+ALTER TABLE archives DROP COLUMN deletion_requested_at, DROP COLUMN delete_after, DROP COLUMN deletion_error, DROP COLUMN deletion_last_attempt_at;
+ALTER TABLE vehicles ADD COLUMN image varchar(255) NOT NULL DEFAULT '';
+'@ | Set-Content -Encoding UTF8 -LiteralPath $lifecycleLegacyPath
+    & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f $lifecycleLegacyPath
+    if ($LASTEXITCODE -ne 0) { throw 'Pre-retention fixture setup failed.' }
+    & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Get-FixtureMigration '0001_archive_retention.sql')
+    if ($LASTEXITCODE -ne 0) { throw 'Retention migration failed.' }
+  }
   $env:HYOPS_TEST_DATABASE_URL = "postgres://hyops_test@127.0.0.1:$fixturePort/hyops_test"
-  if ($Suite -eq 'Realtime') { & bun test --timeout 30000 ./tests/driver-socket.test.ts }
+  if ($Suite -eq 'Sync') {
+    # The receipt table may now be part of the user's consolidated baseline.
+    $receiptMigration = Join-Path $backendRoot 'src/db/migrations/0001_driver_sync_receipts.sql'
+    if (Test-Path -LiteralPath $receiptMigration) {
+      & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -c 'DROP TABLE driver_sync_receipts'
+      if ($LASTEXITCODE -ne 0) { throw 'Pre-sync fixture setup failed.' }
+      & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f $receiptMigration
+      if ($LASTEXITCODE -ne 0) { throw 'Sync receipt migration failed.' }
+    }
+    foreach ($testFile in @('./tests/driver.test.ts', './tests/customer-returns.test.ts', './tests/driver-features.test.ts')) {
+      & bun test --timeout 60000 $testFile
+      if ($LASTEXITCODE -ne 0) { throw "Sync acceptance failed: $testFile" }
+    }
+  }
+  elseif ($Suite -eq 'Lifecycle') { & bun test --timeout 60000 ./tests/lifecycle.test.ts }
+  elseif ($Suite -eq 'RetentionBrowser') { & bun run ./tests/live/runner.ts All 'Archive retention' }
+  elseif ($Suite -eq 'Retention') { & bun test --timeout 60000 ./tests/archive-retention.test.ts }
+  elseif ($Suite -eq 'LifecycleRegression') { & bun test --timeout 30000 ./tests/transactions.test.ts }
+  elseif ($Suite -eq 'Realtime') { & bun test --timeout 30000 ./tests/driver-socket.test.ts }
   elseif ($Suite -eq 'Lalamove') { & bun test --timeout 30000 ./tests/lalamove.test.ts }
   elseif ($Suite -eq 'Backup') { & bun test --timeout 30000 ./tests/backup-schedule.test.ts }
   elseif ($Suite -eq 'Mobile') { & bun run ./tests/mobile/runner.ts }

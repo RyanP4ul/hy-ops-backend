@@ -1,3 +1,4 @@
+import { activeUser } from "../lifecycle/availability";
 import { getOrderCombinedPayment } from "../payments/groups";
 import { CustomerReturnService } from "../deliveries/customer-returns";
 import { queueDeliveryNotifications } from "../deliveries/notification-queue";
@@ -15,6 +16,7 @@ import {
   inventory,
   order_items,
   orders,
+  order_groups,
   payments,
   products,
   product_variants,
@@ -25,8 +27,50 @@ import {
 import { WorkflowError } from "../../utils/workflow-error";
 import { minorUnitsToMoney, moneyToMinorUnits } from "../../utils/money";
 import { assertDriverOwnership, assertOutcomeCommand } from "./policy";
+import { currentStopPlan } from "./stop-plan";
+import { commandHash, replayReceipt, saveReceipt } from "./sync-receipts";
 
 export class DriverService {
+  static async planStop(actorId: number, stopId: number, action: "skip" | "next") {
+    return db.transaction(async tx => {
+      const [assignment] = await tx.select({ deliveryId: deliveries_stops.delivery_id })
+        .from(deliveries_stops).where(eq(deliveries_stops.id, stopId));
+      if (!assignment) throw new WorkflowError("Assignment not found.", 404);
+      // Serialize with outcomes and other planning commands, including other devices.
+      const [run] = await tx.select().from(deliveries)
+        .where(eq(deliveries.id, assignment.deliveryId)).for("update");
+      assertDriverOwnership(run?.driver_id, actorId);
+      if (run.delivery_type === "LALAMOVE" || run.status !== "in_transit")
+        throw new WorkflowError("This trip is no longer in progress. Refresh the trip.");
+      const stops = await tx.select({ id: deliveries_stops.id, status: deliveries_stops.status,
+        groupId: orders.order_group_id }).from(deliveries_stops)
+        .innerJoin(orders, eq(orders.id, deliveries_stops.order_id))
+        .where(eq(deliveries_stops.delivery_id, run.id));
+      const stop = stops.find(s => s.id === stopId);
+      if (!stop || stop.status !== "pending" || !stop.groupId)
+        throw new WorkflowError("This grouped order is no longer available. Refresh the trip.");
+      const plan = currentStopPlan(run.driver_stop_plan, actorId, run.status, stops);
+      if (action === "skip") {
+        if (!plan.skippedStopIds.includes(stopId)) plan.skippedStopIds.push(stopId);
+        if (plan.nextStopId === stopId) plan.nextStopId = null;
+      } else {
+        plan.skippedStopIds = plan.skippedStopIds.filter(id => id !== stopId);
+        plan.nextStopId = stopId;
+      }
+      await tx.update(deliveries).set({ driver_stop_plan: plan,
+        version: sql`${deliveries.version} + 1`, updated_at: new Date() })
+        .where(eq(deliveries.id, run.id));
+      // Notifications are delivered only after the transaction commits.
+      await tx.execute(sql`select pg_notify('hyops_resource_changed', ${JSON.stringify({
+        type: "RESOURCE_CHANGED", payload: { resource: "deliveries", eventId: crypto.randomUUID() },
+      })})`);
+      await tx.execute(sql`select pg_notify('hyops_driver_changed', ${JSON.stringify({
+        driverId: actorId, deliveryId: run.id, kind: "updated", eventId: crypto.randomUUID(),
+      })})`);
+      return { ok: true };
+    });
+  }
+
   static async profile(actorId: number) {
     const [profile] = await db
       .select({
@@ -46,7 +90,7 @@ export class DriverService {
         and(
           eq(users.id, actorId),
           eq(users.role, "driver"),
-          eq(users.is_archived, false),
+          activeUser(),
         ),
       );
     if (!profile)
@@ -113,21 +157,25 @@ export class DriverService {
         .select({
           stop: deliveries_stops,
           order: orders,
+          groupNumber: order_groups.group_number,
           customerName: sql<string>`coalesce(nullif(trim(${orders.shipping_recipient}), ''), ${users.name})`,
         })
         .from(deliveries_stops)
         .innerJoin(orders, eq(orders.id, deliveries_stops.order_id))
+        .leftJoin(order_groups, eq(order_groups.id, orders.order_group_id))
         .innerJoin(customers, eq(customers.id, orders.customer_id))
         .innerJoin(users, eq(users.id, customers.user_id))
         .where(eq(deliveries_stops.delivery_id, id))
         .orderBy(asc(deliveries_stops.leg_index), asc(deliveries_stops.id));
       const result = [];
-      for (const { stop, order, customerName } of stops) {
+      for (const { stop, order, customerName, groupNumber } of stops) {
         const items = await tx
           .select({
             id: order_items.id,
             name: products.name,
             variant: product_variants.name,
+            sku: product_variants.sku,
+            unit: product_variants.unit,
             qty: order_items.quantity,
             price: order_items.unit_price_snapshot,
           })
@@ -165,10 +213,19 @@ export class DriverService {
           .from(driver_stop_outcomes)
           .where(eq(driver_stop_outcomes.stop_id, stop.id));
         const combined = await getOrderCombinedPayment(order.id, tx);
+        const [proof] = await tx
+          .select({ id: driver_stop_proofs.id })
+          .from(driver_stop_proofs)
+          .where(eq(driver_stop_proofs.stop_id, stop.id))
+          .limit(1);
         result.push({
           id: stop.id,
           orderId: order.id,
           orderNumber: order.order_number,
+          orderGroupId: order.order_group_id,
+          orderGroupNumber: groupNumber,
+          notes: order.notes,
+          hasProof: Boolean(proof),
           combinedPaymentNumber: combined?.payment_number ?? null,
           combinedPaymentAllocation: combined?.allocated_amount ?? null,
           customer: customerName,
@@ -206,6 +263,7 @@ export class DriverService {
         id: run.id,
         status: run.status,
         version: run.version,
+        stopPlan: currentStopPlan(run.driver_stop_plan, actorId, run.status, stops.map(s => s.stop)),
         scheduledDate: run.scheduled_date,
         departureTime: run.departure_time,
         scheduledAt: `${run.scheduled_date}T${run.departure_time}+08:00`,
@@ -282,17 +340,15 @@ export class DriverService {
     command: { version: number; operationKey: string; reason?: string },
     outcome: "delivered" | "failed",
   ) {
-    console.log(
-      `Driver ${actorId} marking stop ${stopId} as ${outcome} with command`,
-      command,
-    );
     const reason = outcome === "failed" ? command.reason?.trim() : undefined;
+    const hash = commandHash(outcome, stopId, { version: command.version, reason });
 
     if (outcome === "failed" && !reason)
       throw new WorkflowError("A failure reason is required.", 400);
 
     return db
       .transaction(async (tx) => {
+        const receipt = await replayReceipt(tx, actorId, command.operationKey, hash);
         const [identity] = await tx
           .select({ deliveryId: deliveries_stops.delivery_id })
           .from(deliveries_stops)
@@ -304,6 +360,7 @@ export class DriverService {
           .where(eq(deliveries.id, identity.deliveryId))
           .for("update");
         assertDriverOwnership(run?.driver_id, actorId);
+        if (receipt) return receipt;
         if (run.delivery_type === "LALAMOVE") throw new WorkflowError("External courier jobs are not internal driver assignments.", 403);
         const [stop] = await tx
           .select()
@@ -338,7 +395,7 @@ export class DriverService {
             .where(eq(driver_stop_proofs.stop_id, stopId))
             .limit(1);
           if (!proof)
-            throw new WorkflowError("Submit Proof of Delivery before confirming delivery.");
+            throw new WorkflowError("Submit Proof of Delivery before confirming delivery.", 409, "PROOF_REQUIRED");
         }
         const [keyUsed] = await tx
           .select({ id: driver_stop_outcomes.stop_id })
@@ -401,7 +458,10 @@ export class DriverService {
             updated_at: now,
           })
           .where(eq(deliveries.id, run.id));
-        return { ok: true, deliveryId: run.id };
+        return saveReceipt(tx, actorId, command.operationKey, hash, {
+          ok: true, deliveryId: run.id, entityId: stopId, kind: outcome,
+          previousTripVersion: run.version, tripVersion: run.version + 1,
+        });
       })
       .catch((error: unknown) => {
         const detail = error as { code?: string; cause?: { code?: string } };

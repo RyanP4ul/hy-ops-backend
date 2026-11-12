@@ -75,7 +75,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     const [result] = await sql`select count(*)::int as count from users where role='admin' and not is_archived`;
     expect(result.count).toBe(1);
     expect(await sql`select * from archives`).toHaveLength(1);
-    expect(await sql`select * from audit_logs where action='USER_DEACTIVATED'`).toHaveLength(1);
+    expect(await sql`select * from audit_logs where action='USER_ARCHIVED'`).toHaveLength(1);
   });
 
   test("failed archive insert rolls back deactivation and token revocation", async () => {
@@ -123,7 +123,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     const data = { warehouse_id: 1, product_variant_id: 1, quantity: 3, reserved: 4, version: item.version };
     await expect(InventoryService.updateInventory(item.id, data)).rejects.toThrow("less than reserved");
     await expect(InventoryService.updateInventory(item.id, { ...data, quantity: 10, product_variant_id: 2 })).rejects.toThrow("cannot be changed");
-    await expect(InventoryService.deleteInventory(item.id, item.version)).rejects.toThrow("empty");
+    await expect(InventoryService.deleteInventory(item.id, item.version)).rejects.toThrow("Archive");
   });
 
   async function stockOrder(quantity = 1, paid = 0, customerId = 1, addressId = 1) {
@@ -181,6 +181,134 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
       items: [{ inventory_id: 1, quantity }],
     })) };
   }
+
+  function warehouseApp(role = "staff") {
+    return new Elysia()
+      .onError(({ error, set }) => {
+        const failure = error as Error & { status?: number };
+        set.status = failure.status ?? 500;
+        return { message: failure.message };
+      })
+      .derive({ as: "global" }, () => ({ user: { sub: "1", role } }))
+      .use(require("../src/modules/order").orderRoutes)
+      .use(require("../src/modules/invoice").invoiceRoutes)
+      .use(require("../src/modules/delivery-schedule").deliveryScheduleRoutes)
+      .use(require("../src/modules/inventory").inventoryRoutes)
+      .use(require("../src/modules/warehouse").warehouseRoutes)
+      .use(require("../src/modules/deliveries").deliveriesRoutes);
+  }
+
+  function warehouseRequest(app: ReturnType<typeof warehouseApp>, path: string, method = "GET", data?: unknown) {
+    return app.handle(new Request(`http://localhost${path}`, {
+      method, ...(data === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(data) }),
+    }));
+  }
+
+  async function staffFixture() {
+    const ready = await readyDelivery();
+    await sql`insert into staffs (user_id,warehouse_id) values (1,1)`;
+    await sql`insert into warehouses (name,street_address,city,state,zip_code,created_at,updated_at) values ('Other warehouse','Other street','City','Province','0000',0,0)`;
+    await InventoryService.createInventory({ warehouse_id: 2, product_variant_id: 1, quantity: 100 });
+    const foreign = await OrderService.createOrder({ ...batchInput().orders[0], customer_id: 1, warehouse_id: 2, items: [{ inventory_id: 2, quantity: 1 }] });
+    return { ...ready, foreign, app: warehouseApp() };
+  }
+
+  test("staff warehouse: orders list, details, actions and inventory lookups cannot escape assignment", async () => {
+    const { app, order, foreign } = await staffFixture();
+    const listed = await warehouseRequest(app, "/orders?warehouse_id=2");
+    expect(listed.status).toBe(200);
+    expect(listed.headers.get("X-Total-Count")).toBe("1");
+    expect((await listed.json() as any[]).map(row => row.id)).toEqual([order.id]);
+    expect((await warehouseRequest(app, `/orders/${foreign.id}`)).status).toBe(404);
+    expect((await warehouseRequest(app, `/invoice/${foreign.id}`)).status).toBe(404);
+    expect((await warehouseRequest(app, `/invoice/${order.id}`)).status).toBe(200);
+    const details = await warehouseRequest(app, `/orders/details?ids=${order.id},${foreign.id}`);
+    expect((await details.json() as any[]).map(row => row.id)).toEqual([order.id]);
+    for (const action of ["process", "delivery", "cancel"]) {
+      expect((await warehouseRequest(app, `/orders/${action}/${foreign.id}?version=1`, "POST")).status).toBe(404);
+    }
+    expect((await warehouseRequest(app, `/orders/${foreign.id}`, "PUT", { version: 1, notes: "Unauthorized" })).status).toBe(404);
+    expect((await warehouseRequest(app, `/orders/${foreign.id}/destination`, "PUT", { version: 1, latitude: 14.6, longitude: 121.2 })).status).toBe(404);
+    expect((await OrderService.getOrderById(foreign.id))?.status).toBe("PENDING");
+    const names = await warehouseRequest(app, "/inventory/names?warehouse_id=2");
+    expect((await names.json() as any).rows.map((row: any) => row.id)).toEqual([1]);
+    const stock = await warehouseRequest(app, "/inventory/details?ids=1,2");
+    expect((await stock.json() as any[]).map(row => row.inventory_id)).toEqual([1]);
+    const adminList = await warehouseRequest(warehouseApp("admin"), "/orders");
+    expect((await adminList.json() as any[])).toHaveLength(2);
+    expect((await warehouseRequest(warehouseApp("admin"), `/orders/${foreign.id}`)).status).toBe(200);
+  });
+
+  test("staff warehouse: checkout assigns server warehouse for single, batch and walk-in orders", async () => {
+    const { app } = await staffFixture();
+    const { warehouse_id: omitted, ...entry } = batchInput().orders[0];
+    for (const warehouse of [undefined, 2]) {
+      const response = await warehouseRequest(app, "/orders", "POST", { ...entry, customer_id: 1, warehouse_id: warehouse });
+      expect(response.status).toBe(200);
+      expect((await OrderService.getOrderById((await response.json() as any).id))?.warehouse_id).toBe(1);
+    }
+    for (const payment_mode of ["SEPARATE", "COMBINED"]) {
+      const response = await warehouseRequest(app, "/orders/batch", "POST", {
+        customer_id: 1, payment_mode, payment: { payment_method: "CASH", amount_paid: 5 },
+        orders: [entry, { ...entry, warehouse_id: 2 }],
+      });
+      expect(response.status).toBe(200);
+      const rows = (await response.json() as any).orders;
+      expect((await Promise.all(rows.map((row: any) => OrderService.getOrderById(row.id)))).every(row => row?.warehouse_id === 1)).toBe(true);
+    }
+    const walkIn = await warehouseRequest(app, "/orders/walk-in", "POST", { payment_method: "CASH", amount_tendered: 20, items: [{ inventory_id: 1, quantity: 1 }] });
+    expect(walkIn.status).toBe(200);
+    expect((await OrderService.getOrderById((await walkIn.json() as any).id))?.warehouse_id).toBe(1);
+    const invalid = await warehouseRequest(app, "/orders", "POST", { ...entry, customer_id: 1, warehouse_id: 2, items: [{ inventory_id: 2, quantity: 1 }] });
+    expect(invalid.status).toBe(409);
+    const admin = warehouseApp("admin");
+    expect((await warehouseRequest(admin, "/orders", "POST", { ...entry, customer_id: 1 })).status).toBe(409);
+    const foreign = await warehouseRequest(admin, "/orders", "POST", { ...entry, customer_id: 1, warehouse_id: 2, items: [{ inventory_id: 2, quantity: 1 }] });
+    expect(foreign.status).toBe(200);
+    expect((await OrderService.getOrderById((await foreign.json() as any).id))?.warehouse_id).toBe(2);
+  });
+
+  test("staff warehouse: schedules and group readiness ignore spoofed warehouse and reject foreign assignments", async () => {
+    const { app, order, foreign, data } = await staffFixture();
+    await OrderService.processOrder(foreign.id, 1);
+    await OrderService.deliveryOrder(foreign.id, 2);
+    const group = await OrderService.createOrders(batchInput());
+    for (const member of group) {
+      await OrderService.processOrder(member.id, 1);
+      await OrderService.deliveryOrder(member.id, 2);
+    }
+    const groupId = (await OrderService.getOrderById(group[0].id))!.order_group_id!;
+    const schedules = await warehouseRequest(app, "/delivery-schedules?warehouse_id=2");
+    expect(schedules.status).toBe(200);
+    expect((await schedules.json() as any[]).every(row => row.warehouse_id === 1)).toBe(true);
+    for (const query of ["", "?warehouse_id=2"]) {
+      const ready = await warehouseRequest(app, `/orders/groups/${groupId}/ready${query}`);
+      expect(ready.status).toBe(200);
+      expect((await ready.json() as any).rows.map((row: any) => row.id)).toEqual(group.map(row => row.id));
+    }
+    const dates = await warehouseRequest(app, "/delivery-schedules/available-dates?warehouse_id=2");
+    expect(dates.status).toBe(200);
+    expect((await warehouseRequest(app, "/deliveries", "POST", { ...data, order_ids: [foreign.id] })).status).toBe(403);
+    const assigned = await warehouseRequest(app, "/deliveries", "POST", { ...data, order_ids: [order.id] });
+    expect(assigned.status).toBe(200);
+    expect((await OrderService.getOrderById(foreign.id))?.status).toBe("SCHEDULING");
+  });
+
+  test("staff warehouse: missing, inactive or archived assignments fail closed", async () => {
+    const { app } = await staffFixture();
+    for (const state of ["missing", "inactive", "archived"]) {
+      if (state === "missing") await sql`delete from staffs where user_id=1`;
+      if (state === "inactive") {
+        await sql`insert into staffs(user_id,warehouse_id) values (1,1)`;
+        await sql`update warehouses set is_active=false where id=1`;
+      }
+      if (state === "archived") await sql`update warehouses set is_active=true,is_archived=true where id=1`;
+      for (const path of ["/orders", "/delivery-schedules", "/delivery-schedules/available-dates", "/warehouses/names"]) {
+        expect((await warehouseRequest(app, path)).status).toBe(403);
+      }
+      expect((await warehouseRequest(app, "/orders", "POST", { ...batchInput().orders[0], customer_id: 1 })).status).toBe(403);
+    }
+  });
 
   function combinedInput(amount = 10) {
     return { customer_id: 1, payment_mode: "COMBINED" as const,
@@ -257,6 +385,30 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     expect((await OrderService.getSchedulingEntries(0, 10, "", 1)).rows.some(row => row.order_group_id === groupId)).toBe(false);
   });
 
+  test("cancelled group members are excluded while every remaining member must be ready", async () => {
+    const { data } = await readyDelivery();
+    const created = await OrderService.createOrders(batchInput([1, 1, 1]));
+    const [cancelled, first, last] = created;
+    const groupId = (await OrderService.getOrderById(first.id))!.order_group_id!;
+    await OrderService.cancelOrder(cancelled.id, 1);
+    await OrderService.processOrder(first.id, 1);
+    await OrderService.deliveryOrder(first.id, 2);
+    const entry = (await OrderService.getSchedulingEntries(0, 10, "", 1)).rows.find(row => row.order_group_id === groupId)!;
+    expect(entry).toMatchObject({ total_members: 2, ready_count: 1, can_schedule: false });
+    expect(entry.members.map(row => row.id)).toEqual([first.id, last.id]);
+    await rejected(() => OrderService.getReadyOrderGroup(groupId, 1), "All orders");
+    await rejected(() => DeliveryService.createDelivery({ ...data, order_ids: [first.id] }), "All orders");
+    await OrderService.processOrder(last.id, 1);
+    await OrderService.deliveryOrder(last.id, 2);
+    const ready = await OrderService.getReadyOrderGroup(groupId, 1);
+    expect(ready.rows.map(row => row.id)).toEqual([first.id, last.id]);
+    expect((await OrderService.getSchedulingEntries(0, 10, "", 1)).rows.find(row => row.order_group_id === groupId)).toMatchObject({ total_members: 2, ready_count: 2, can_schedule: true });
+    await rejected(() => DeliveryService.createDelivery({ ...data, order_ids: [first.id] }), "every order");
+    const delivery = await DeliveryService.createDelivery({ ...data, order_ids: ready.rows.map(row => row.id) });
+    expect((await sql`select order_id from deliveries_stops where delivery_id=${delivery.id} order by order_id`).map(row => row.order_id)).toEqual([first.id, last.id]);
+    expect((await sql`select status from orders where id=${cancelled.id}`)[0].status).toBe("CANCELLED");
+  });
+
   test("cross warehouse groups stay blocked and do not expose other warehouse destinations", async () => {
     await seed(); await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 100 });
     await sql`insert into warehouses (name,street_address,city,state,zip_code,created_at,updated_at) values ('Other','Street','City','Province','0000',0,0)`;
@@ -295,7 +447,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     expect((await PaymentService.getPayments(0, 10, "BANK-ONE-RECEIPT")).total).toBe(2);
     await sql`insert into users(email,name,password_hash,role,created_at,updated_at) values ('combined-driver@example.test','Driver','fixture','driver',0,0)`;
     await sql`insert into drivers(user_id,warehouse_id,phone_number) values (4,1,'09000000000')`;
-    await sql`insert into vehicles(warehouse_id,plate_number,image,created_at,updated_at) values (1,'COMBINED-001','',0,0)`;
+    await sql`insert into vehicles(warehouse_id,plate_number,created_at,updated_at) values (1,'COMBINED-001',0,0)`;
     for (const order of created) { await OrderService.processOrder(order.id, 1); await OrderService.deliveryOrder(order.id, 2); }
     const run = await DeliveryService.createDelivery({ order_ids: created.map(order => order.id), scheduled_date: "2099-01-01", scheduled_time: "09:00", delivery_type: "INTERNAL", driver_id: 4, vehicle_id: 1, delivery_allowance: 0, fuel: 0, toll: 0 });
     const trip = await require("../src/modules/driver/service").DriverService.trip(4, run.id);
@@ -388,7 +540,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     await seed();
     await sql`insert into users (email,name,password_hash,role,created_at,updated_at) values ('driver@example.test','Driver','fixture','driver',0,0)`;
     await sql`insert into drivers (user_id,warehouse_id,phone_number) values (4,1,'09000000000')`;
-    await sql`insert into vehicles (warehouse_id,plate_number,image,created_at,updated_at) values (1,'BATCH-001','',0,0)`;
+    await sql`insert into vehicles (warehouse_id,plate_number,created_at,updated_at) values (1,'BATCH-001',0,0)`;
     await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
     const address = await OrderService.saveShippingAddress(1, { address_line: "Batch second destination", barangay: "B", city_municipality: "C", province: "P", latitude: 14.7, longitude: 121.3 });
     const input = batchInput([1, address.id], 2);
@@ -558,7 +710,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     await seed();
     await sql`insert into users (email,name,password_hash,role,created_at,updated_at) values ('driver@example.test','Driver','fixture','driver',0,0)`;
     await sql`insert into drivers (user_id,warehouse_id,phone_number) values (4,1,'09000000000')`;
-    await sql`insert into vehicles (warehouse_id,plate_number,image,created_at,updated_at) values (1,'TEST-001','',0,0)`;
+    await sql`insert into vehicles (warehouse_id,plate_number,created_at,updated_at) values (1,'TEST-001',0,0)`;
     await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
     const order = await stockOrder(2);
     await OrderService.processOrder(order.id, 1);
@@ -667,7 +819,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     await sql`update customer_addresses set latitude='1',longitude='2' where id=2`;
     await OrderService.processOrder(order.id, 1); await OrderService.deliveryOrder(order.id, 2);
     await sql`insert into users (email,name,password_hash,role,created_at,updated_at) values ('driver@example.test','Driver','fixture','driver',0,0)`;
-    await sql`insert into vehicles (warehouse_id,plate_number,image,created_at,updated_at) values (1,'LOC-001','',0,0)`;
+    await sql`insert into vehicles (warehouse_id,plate_number,created_at,updated_at) values (1,'LOC-001',0,0)`;
     await sql`insert into drivers(user_id,warehouse_id,status,phone_number) values (4,1,'available','09000000000')`;
     const delivery = await DeliveryService.createDelivery({ order_ids: [order.id], scheduled_date: '2099-01-01', scheduled_time: '09:00', delivery_type: 'INTERNAL', driver_id: 4, vehicle_id: 1, delivery_allowance: 0, fuel: 0, toll: 0 });
     expect((await sql`select latitude,longitude from deliveries_stops where delivery_id=${delivery.id}`)[0]).toMatchObject({ latitude: '15.300000', longitude: '120.800000' });
@@ -751,7 +903,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     expect((await ProductService.getProductByOffset(0, 10, 'FIXTURE')).rows).toHaveLength(1);
     expect((await ProductService.getProductByOffset(0, 10, '', 'without')).rows).toHaveLength(0);
     await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 0 });
-    await expect(ProductService.deleteProductById(1, 1)).rejects.toThrow("linked to inventory");
+    await expect(ProductService.deleteProductById(1, 1)).rejects.toThrow("Archive");
   });
 
   test("real JWT login, refresh, logout and role restrictions use current database sessions", async () => {
@@ -778,6 +930,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     expect((await authApp.handle(new Request('http://localhost/payments', { headers: { cookie } }))).status).toBe(401);
     expect((await authApp.handle(new Request('http://localhost/auth/refresh', { method: 'POST', headers: { cookie } }))).status).toBe(401);
     await sql`update users set role='staff' where id=1`;
+    await sql`insert into staffs (user_id,warehouse_id) values (1,1)`;
     const staffLogin = await authApp.handle(new Request('http://localhost/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'a@example.test', password: 'fixture-password', is_mobile: false }) }));
     const staff = await staffLogin.json() as { access_token: string };
     expect((await authApp.handle(new Request('http://localhost/inventory', { headers: { cookie: `access_token=${staff.access_token}` } }))).status).toBe(200);
@@ -852,7 +1005,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
   async function rejected(action: () => Promise<unknown>, message: string) { let failure: unknown; try { await action(); } catch (error) { failure = error; } expect(failure instanceof Error ? failure.message : "NO ERROR").toContain(message); }
   test("GPS survives new source instances and ignores duplicate and older fixes", async () => {
     await seed();
-    await sql`insert into vehicles (warehouse_id,plate_number,type,status,image,created_at,updated_at) values (1,'GPS-1','truck','available','',0,0)`;
+    await sql`insert into vehicles (warehouse_id,plate_number,type,status,created_at,updated_at) values (1,'GPS-1','truck','available',0,0)`;
     const { recordPosition } = require('../src/modules/fleet-map/fleet.service');
     const { DatabasePositionSource } = require('../src/modules/fleet-map/source');
     const first = new Date(Date.now()-60_000).toISOString();
@@ -895,13 +1048,13 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
   });
   test("vehicle history cannot cascade away and stale edits fail", async () => {
     await seed(); const { VehicleService } = require('../src/modules/vehicles/service');
-    await rejected(() => VehicleService.createVehicle({ warehouse_id: 1, plate_number: 'BAD', type: 'truck', image: '', status: 'on_delivery' }), 'dispatch');
-    const data = { warehouse_id: 1, plate_number: 'SAFE', type: 'truck', image: '', status: 'available' };
+    // The creation API always initializes availability, even with stale client input.
+    const data = { warehouse_id: 1, plate_number: 'SAFE', type: 'truck', status: 'available' };
     await VehicleService.createVehicle(data); await VehicleService.updateVehicle(1, { ...data, plate_number: 'SAFE-EDIT', version: 1 });
     await rejected(() => VehicleService.updateVehicle(1, { ...data, version: 1 }), 'Version mismatch');
     await sql`insert into users(email,name,password_hash,role,created_at,updated_at) values ('driver@fixture.test','Driver','fixture','driver',0,0)`;
     await sql`insert into deliveries(driver_id,vehicle_id,scheduled_date,departure_time,status,delivery_type) values (4,1,'2026-10-31','10:00','completed','INTERNAL')`;
-    await rejected(() => VehicleService.deleteVehicle(1, 2), 'history'); expect(await sql`select id from deliveries`).toHaveLength(1);
+    await rejected(() => VehicleService.deleteVehicle(1, 2), 'Archive'); expect(await sql`select id from deliveries`).toHaveLength(1);
   });
 
   test("concurrent final stops transition once to returning and completion releases assignments", async () => {
@@ -909,7 +1062,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     const second = await stockOrder(1); await OrderService.processOrder(second.id, 1); await OrderService.deliveryOrder(second.id, 2);
     const delivery = await DeliveryService.createDelivery({ ...data, order_ids: [order.id, second.id] });
     const { VehicleService } = require('../src/modules/vehicles/service'); const { assignVehicleWarehouse } = require('../src/modules/fleet-map/fleet.service');
-    await rejected(() => VehicleService.updateVehicle(1, { warehouse_id: 1, plate_number: 'TEST-001', image: '', type: 'truck', status: 'maintenance', version: 1 }), 'scheduled/active');
+    await rejected(() => VehicleService.updateVehicle(1, { warehouse_id: 1, plate_number: 'TEST-001', type: 'truck', status: 'maintenance', version: 1 }), 'scheduled/active');
     await rejected(() => assignVehicleWarehouse(1, 1), 'scheduled/active');
     await rejected(() => UserService.updateUser(4, 1, { name: "Driver", email: "driver@example.test", role: "driver", profile: { warehouse_name: "Fixture", warehouse_id: 1, status: "day_off", phone_number: "09000000000" } }, { id: 1, tokenVersion: 0 }), "scheduled/active");
     await DeliveryService.dispatchDelivery(delivery.id);
@@ -934,7 +1087,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     try { await rejected(() => WarehouseService.archiveWarehouse(1, 1, 3), 'Failed query'); } finally { await sql`alter table archives drop constraint reject_warehouse_fixture`; }
     expect((await sql`select is_archived,version from warehouses`)[0]).toMatchObject({ is_archived: false, version: 3 });
     await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 1 });
-    await rejected(() => WarehouseService.deleteWarehouse(1, 3), 'linked');
+    await rejected(() => WarehouseService.deleteWarehouse(1, 3), 'Archive');
     expect(await sql`select id from inventory`).toHaveLength(1);
     await WarehouseService.archiveWarehouse(1, 1, 3);
     expect((await sql`select is_archived,version from warehouses`)[0]).toMatchObject({ is_archived: true, version: 4 });
@@ -1108,7 +1261,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     await seed();
     await sql`insert into users (email,name,password_hash,role,created_at,updated_at) values ('driver@example.test','Driver','fixture','driver',0,0)`;
     await sql`insert into drivers (user_id,warehouse_id,phone_number) values (4,1,'09000000000')`;
-    await sql`insert into vehicles (warehouse_id,plate_number,image,created_at,updated_at) values (1,'WALK-IN','',0,0)`;
+    await sql`insert into vehicles (warehouse_id,plate_number,created_at,updated_at) values (1,'WALK-IN',0,0)`;
     const [item] = await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 150 });
     const input = walkInDelivery(item.id);
     const sales = await Promise.all([OrderService.createWalkInOrder(input, 1), OrderService.createWalkInOrder(input, 1)]);

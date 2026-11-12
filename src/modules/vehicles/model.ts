@@ -10,13 +10,18 @@ const vehicleSchema = t.Object({
     t.Literal("on_delivery"),
   ]),
   type: t.Union([t.Literal("truck"), t.Literal("van"), t.Literal("other")]),
-  image: t.String({ minLength: 0, maxLength: 255 }),
 });
 
 export type VehicleType = Static<typeof vehicleSchema>;
+export type VehicleCreateType = Omit<VehicleType, "status"> & { status?: VehicleType["status"] };
 
 export const vehicleModel = new Elysia().model({
-  "vehicle.create": vehicleSchema,
+  "vehicle.create": t.Object({
+    warehouse_id: vehicleSchema.properties.warehouse_id,
+    plate_number: vehicleSchema.properties.plate_number,
+    type: vehicleSchema.properties.type,
+    status: t.Optional(vehicleSchema.properties.status),
+  }),
   "vehicle.update": t.Object({
     ...vehicleSchema.properties,
     version: t.Numeric({ minimum: 1 }),

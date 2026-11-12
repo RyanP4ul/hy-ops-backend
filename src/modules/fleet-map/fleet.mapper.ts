@@ -1,4 +1,5 @@
 import { isScheduledTripOverdue, toManilaIso } from "../../utils/time";
+import { currentStopPlan } from "../driver/stop-plan";
 import { toWarehouseDto } from "../warehouse/mapper";
 import type {
   DeliveryRow,
@@ -170,6 +171,15 @@ export function buildFleetOverview(raw: FleetRawData): FleetOverviewDto {
     const upcoming = mine.filter((d) => d.delivery.status === "scheduled");
 
     const stops = current ? stopsOf(current.delivery.id) : [];
+    if (current) {
+      const run = current.delivery;
+      const plan = currentStopPlan(run.driver_stop_plan, run.driver_id, run.status,
+        (stopsByDelivery.get(run.id) ?? []).map(row => row.stop));
+      for (const stop of stops) {
+        stop.skippedForNow = plan.skippedStopIds.includes(Number(stop.id));
+        stop.deliverNext = plan.nextStopId === Number(stop.id);
+      }
+    }
     const completedStops = stops.filter((s) => s.status === "completed").length;
     const allDone = stops.length > 0 && completedStops === stops.length;
 

@@ -7,8 +7,8 @@ export function assertDriverOwnership(assignedId: number | undefined, actorId: n
 export function assertOutcomeCommand(input: { status: string; version: number; currentVersion: number; existing?: { actor_id: number; operation_key: string; outcome: string; reason: string | null }; actorId: number; key: string; outcome: string; reason?: string }) {
   if (input.existing) {
     if (input.existing.actor_id === input.actorId && input.existing.operation_key === input.key && input.existing.outcome === input.outcome && (input.existing.reason ?? "") === (input.reason ?? "")) return "replay";
-    throw new WorkflowError("This stop already has a recorded outcome. Refresh the trip.");
+    throw new WorkflowError("This stop already has a recorded outcome. Refresh the trip.", 409, "OUTCOME_CHANGED");
   }
-  if (input.status !== "in_transit" || input.version !== input.currentVersion) throw new WorkflowError("Assignment changed. Refresh the trip before continuing.");
+  if (input.status !== "in_transit" || input.version !== input.currentVersion) throw new WorkflowError("Assignment changed. Refresh the trip before continuing.", 409, "VERSION_CONFLICT");
   return "apply";
 }

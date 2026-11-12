@@ -3,9 +3,10 @@ import { InventoryService } from "./service";
 import { inventory_stock_status, inventoryModel } from "./model";
 import { AuthUser } from "../auth/schema";
 import { previewReconciliation, reconcileReservations } from "./reconciliation";
+import { staffWarehouse } from "../deliveries/scope";
 
 export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
-  .decorate("user", AuthUser)
+  .decorate("user", {} as AuthUser)
   .use(inventoryModel)
   .get("/reconciliation", () => previewReconciliation(), { detail: { summary: 'Get reconciliation', description: 'GET endpoint for reconciliation in the inventory module.', tags: ['Inventory'] } })
   .post("/reconciliation", ({ body, user }) => reconcileReservations(body.token, body.reason, Number(user.sub)), {
@@ -20,7 +21,7 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
       detail: { summary: 'Get summary', description: 'GET endpoint for summary in the inventory module.', tags: ['Inventory'] },
     query: t.Object({ warehouse_id: t.Optional(t.Numeric({ minimum: 1 })) }),
   })
-  .get("/", async ({ query, set }) => {
+  .get("/", async ({ query, set, user }) => {
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;
     const search = query.search ? query.search.trim() : "";
@@ -31,9 +32,9 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
       query.stock_status ? query.stock_status.trim().toLowerCase() : "all"
     ) as inventory_stock_status;
 
-    const warehouse_id = query.warehouse_id
+    const warehouse_id = await staffWarehouse(user) ?? (query.warehouse_id
       ? parseInt(query.warehouse_id)
-      : null;
+      : null);
 
     if (limit >= 50) limit = 50;
 
@@ -45,6 +46,7 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
       warehouse_id,
       from,
       to,
+      query.active_only === "true",
     );
 
     set.headers["X-Total-Count"] = inventory.total;
@@ -101,13 +103,13 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
 
     return await InventoryService.deleteInventory(id, version);
   }, { detail: { summary: 'Delete by id', description: 'DELETE endpoint for by id in the inventory module.', tags: ['Inventory'] } })
-  .get("/names", async ({ query }) => {
+  .get("/names", async ({ query, user }) => {
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;
-    const warehouse_id = query.warehouse_id ? parseInt(query.warehouse_id) : -1;
+    const warehouse_id = await staffWarehouse(user) ?? (query.warehouse_id ? parseInt(query.warehouse_id) : -1);
     return await InventoryService.getInventoryNames(page, limit, warehouse_id);
   }, { detail: { summary: 'Get names', description: 'GET endpoint for names in the inventory module.', tags: ['Inventory'] } })
-  .get("/details", async ({ query }) => {
+  .get("/details", async ({ query, user }) => {
     const order_ids = query.ids ? query.ids.split(",").map(Number) : [];
-    return await InventoryService.getInventoryDetailById(order_ids);
+    return await InventoryService.getInventoryDetailById(order_ids, await staffWarehouse(user));
   }, { detail: { summary: 'Get details', description: 'GET endpoint for details in the inventory module.', tags: ['Inventory'] } });

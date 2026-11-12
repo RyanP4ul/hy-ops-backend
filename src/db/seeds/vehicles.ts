@@ -8,7 +8,7 @@ const vehicle_data: VehicleInsert[] = [
     plate_number: "ABC-1234",
     status: "available",
     type: "truck",
-    image: "/vehicles/truck.svg",
+
     created_at: Math.floor(Date.now() / 1000),
     updated_at: Math.floor(Date.now() / 1000),
   },
@@ -17,7 +17,7 @@ const vehicle_data: VehicleInsert[] = [
     plate_number: "XYZ-5678",
     status: "maintenance",
     type: "van",
-    image: "/vehicles/van.svg",
+
     created_at: Math.floor(Date.now() / 1000),
     updated_at: Math.floor(Date.now() / 1000),
   },

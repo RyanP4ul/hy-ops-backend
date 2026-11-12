@@ -19,7 +19,12 @@ CREATE TABLE "archives" (
 	"entity_id" varchar(255) NOT NULL,
 	"entity_type" varchar(255) NOT NULL,
 	"archived_by" integer NOT NULL,
-	"archived_at" integer NOT NULL
+	"archived_at" integer NOT NULL,
+	"deletion_requested_at" integer,
+	"delete_after" integer,
+	"deletion_error" text,
+	"deletion_last_attempt_at" integer,
+	CONSTRAINT "archives_retention_valid" CHECK (("archives"."deletion_requested_at" is null and "archives"."delete_after" is null) or ("archives"."deletion_requested_at" is not null and "archives"."delete_after" is not null and "archives"."deletion_requested_at" >= "archives"."archived_at" and "archives"."delete_after" >= "archives"."deletion_requested_at" + 2592000))
 );
 --> statement-breakpoint
 CREATE TABLE "audit_logs" (
@@ -109,6 +114,7 @@ CREATE TABLE "deliveries" (
 	"delivery_type" "delivery_type" DEFAULT 'INTERNAL' NOT NULL,
 	"status" "deliveries_status" DEFAULT 'scheduled' NOT NULL,
 	"version" integer DEFAULT 1 NOT NULL,
+	"driver_stop_plan" jsonb,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "unique_delivery" UNIQUE("driver_id","scheduled_date","departure_time")
@@ -208,6 +214,14 @@ CREATE TABLE "driver_stop_outcomes" (
 	CONSTRAINT "driver_failure_reason_required" CHECK ("driver_stop_outcomes"."outcome" <> 'failed' OR length(trim("driver_stop_outcomes"."reason")) > 0 AND "driver_stop_outcomes"."reason" IS NOT NULL)
 );
 --> statement-breakpoint
+CREATE TABLE "driver_sync_receipts" (
+	"operation_key" uuid PRIMARY KEY NOT NULL,
+	"actor_id" integer NOT NULL,
+	"request_hash" text NOT NULL,
+	"result" jsonb NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "inventory" (
 	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "inventory_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"warehouse_id" integer NOT NULL,
@@ -215,6 +229,9 @@ CREATE TABLE "inventory" (
 	"product_variant_id" integer NOT NULL,
 	"quantity" integer NOT NULL,
 	"reserved" integer DEFAULT 0 NOT NULL,
+	"is_archived" boolean DEFAULT false NOT NULL,
+	"archived_at" integer,
+	"is_active" boolean DEFAULT true NOT NULL,
 	"version" integer DEFAULT 1 NOT NULL,
 	"created_at" integer NOT NULL,
 	"updated_at" integer NOT NULL,
@@ -298,7 +315,7 @@ CREATE TABLE "notifications" (
 	"message" text NOT NULL,
 	"type" varchar(50) NOT NULL,
 	"is_read" boolean DEFAULT false NOT NULL,
-	"created_at" integer DEFAULT 1794317500 NOT NULL,
+	"created_at" integer DEFAULT 1794398274 NOT NULL,
 	CONSTRAINT "notifications_user_title_unique_idx" UNIQUE("user_id","title")
 );
 --> statement-breakpoint
@@ -418,6 +435,9 @@ CREATE TABLE "product_variants" (
 CREATE TABLE "products" (
 	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "products_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"name" varchar(255) NOT NULL,
+	"is_archived" boolean DEFAULT false NOT NULL,
+	"archived_at" integer,
+	"is_active" boolean DEFAULT true NOT NULL,
 	"version" integer DEFAULT 1 NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -478,6 +498,7 @@ CREATE TABLE "users" (
 	"refresh_token" varchar,
 	"token_version" integer DEFAULT 0 NOT NULL,
 	"last_login" integer,
+	"is_active" boolean DEFAULT true NOT NULL,
 	"version" integer DEFAULT 1 NOT NULL,
 	"is_archived" boolean DEFAULT false NOT NULL,
 	"archived_at" integer,
@@ -492,7 +513,9 @@ CREATE TABLE "vehicles" (
 	"plate_number" varchar(255) NOT NULL,
 	"status" "vehicle_status_enum" DEFAULT 'available' NOT NULL,
 	"type" "vehicle_type_enum" DEFAULT 'truck' NOT NULL,
-	"image" varchar(255) NOT NULL,
+	"is_archived" boolean DEFAULT false NOT NULL,
+	"archived_at" integer,
+	"is_active" boolean DEFAULT true NOT NULL,
 	"version" integer DEFAULT 1 NOT NULL,
 	"created_at" integer NOT NULL,
 	"updated_at" integer NOT NULL,
@@ -511,6 +534,7 @@ CREATE TABLE "warehouses" (
 	"longitude" numeric,
 	"pickup_contact_name" varchar,
 	"pickup_contact_phone" varchar,
+	"is_active" boolean DEFAULT true NOT NULL,
 	"version" integer DEFAULT 1 NOT NULL,
 	"is_archived" boolean DEFAULT false NOT NULL,
 	"archived_at" integer,
@@ -622,6 +646,7 @@ ALTER TABLE "driver_stop_proofs" ADD CONSTRAINT "driver_stop_proofs_stop_id_deli
 ALTER TABLE "driver_stop_proofs" ADD CONSTRAINT "driver_stop_proofs_actor_id_users_id_fk" FOREIGN KEY ("actor_id") REFERENCES "public"."users"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "driver_stop_outcomes" ADD CONSTRAINT "driver_stop_outcomes_stop_id_deliveries_stops_id_fk" FOREIGN KEY ("stop_id") REFERENCES "public"."deliveries_stops"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "driver_stop_outcomes" ADD CONSTRAINT "driver_stop_outcomes_actor_id_users_id_fk" FOREIGN KEY ("actor_id") REFERENCES "public"."users"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "driver_sync_receipts" ADD CONSTRAINT "driver_sync_receipts_actor_id_users_id_fk" FOREIGN KEY ("actor_id") REFERENCES "public"."users"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "inventory" ADD CONSTRAINT "inventory_warehouse_id_warehouses_id_fk" FOREIGN KEY ("warehouse_id") REFERENCES "public"."warehouses"("id") ON DELETE set null ON UPDATE cascade;--> statement-breakpoint
 ALTER TABLE "inventory" ADD CONSTRAINT "inventory_product_id_products_id_fk" FOREIGN KEY ("product_id") REFERENCES "public"."products"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
 ALTER TABLE "inventory" ADD CONSTRAINT "inventory_product_variant_id_product_variants_id_fk" FOREIGN KEY ("product_variant_id") REFERENCES "public"."product_variants"("id") ON DELETE set null ON UPDATE cascade;--> statement-breakpoint
@@ -661,10 +686,12 @@ ALTER TABLE "payment_refunds" ADD CONSTRAINT "payment_refunds_payment_id_payment
 ALTER TABLE "payment_refunds" ADD CONSTRAINT "payment_refunds_actor_id_users_id_fk" FOREIGN KEY ("actor_id") REFERENCES "public"."users"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "vehicle_positions" ADD CONSTRAINT "vehicle_positions_vehicle_id_vehicles_id_fk" FOREIGN KEY ("vehicle_id") REFERENCES "public"."vehicles"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "payment_receipts" ADD CONSTRAINT "payment_receipts_payment_id_payments_id_fk" FOREIGN KEY ("payment_id") REFERENCES "public"."payments"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "archives_delete_after_idx" ON "archives" USING btree ("delete_after");--> statement-breakpoint
 CREATE INDEX "customer_return_warehouse_status" ON "customer_returns" USING btree ("warehouse_id","status");--> statement-breakpoint
 CREATE INDEX "customer_return_delivery" ON "customer_returns" USING btree ("assigned_delivery_id");--> statement-breakpoint
 CREATE INDEX "delivery_notification_status_idx" ON "delivery_notifications" USING btree ("status");--> statement-breakpoint
 CREATE INDEX "driver_proofs_stop_idx" ON "driver_stop_proofs" USING btree ("stop_id");--> statement-breakpoint
+CREATE INDEX "driver_sync_receipts_actor_idx" ON "driver_sync_receipts" USING btree ("actor_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "lalamove_active_order_unique" ON "delivery_orders" USING btree ("order_id") WHERE "delivery_orders"."active" = true;--> statement-breakpoint
 CREATE UNIQUE INDEX "lalamove_provider_order_unique" ON "delivery_orders" USING btree ("environment","market","lalamove_order_id");--> statement-breakpoint
 CREATE INDEX "notifications_id_idx" ON "notifications" USING btree ("id");--> statement-breakpoint

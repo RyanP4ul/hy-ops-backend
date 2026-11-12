@@ -2,6 +2,7 @@ import { relations } from "drizzle-orm";
 import {
   decimal,
   index,
+  boolean,
   integer,
   pgTable,
   timestamp,
@@ -15,6 +16,9 @@ export const products = pgTable(
     id: integer().primaryKey().generatedAlwaysAsIdentity(),
     name: varchar({ length: 255 }).notNull(),
 
+    is_archived: boolean().notNull().default(false),
+    archived_at: integer(),
+    is_active: boolean().notNull().default(true),
     version: integer().notNull().default(1),
 
     created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
@@ -75,7 +79,7 @@ export const productVariantRelations = relations(
 
 export type ProductInsert = Omit<
   typeof products.$inferInsert,
-  "created_at" | "updated_at"
+  "created_at" | "updated_at" | "is_active" | "is_archived" | "archived_at"
 >;
 export type ProductSelect = typeof products.$inferSelect;
 

@@ -84,9 +84,10 @@ class TaskManager {
     await this.start(name);
   }
 
-  async updateInterval(name: string, interval: number) {
+  async updateInterval(name: string, interval: number, callback?: TaskCallback) {
     const task = this.getTask(name);
     task.interval = interval;
+    if (callback) task.callback = callback;
 
     if (task.running) {
       await this.restart(name);
@@ -95,7 +96,7 @@ class TaskManager {
 
   async runNow(name: string) {
     const task = this.getTask(name);
-    await this.execute(task, false);
+    await this.execute(task, false, true);
   }
 
   /**
@@ -119,7 +120,7 @@ class TaskManager {
   /**
    * Execute a task safely
    */
-  private async execute(task: Task, requireRunning = true) {
+  private async execute(task: Task, requireRunning = true, propagateError = false) {
     if (requireRunning && !task.running) {
       return;
     }
@@ -142,6 +143,7 @@ class TaskManager {
           error.message,
         );
       }
+      if (propagateError) throw error;
     }
   }
 

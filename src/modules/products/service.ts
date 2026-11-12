@@ -22,7 +22,7 @@ export abstract class ProductService {
         created_at: false,
         updated_at: false,
       },
-      where: eq(products.id, id),
+      where: and(eq(products.id, id), eq(products.is_archived, false)),
       with: {
         variants: {
           columns: {
@@ -60,7 +60,7 @@ export abstract class ProductService {
   ) {
     const offset = Math.max(page * limit, 0);
     const variantExists = sql`exists (select 1 from product_variants pv where pv.product_id = ${products.id})`;
-    const where = and(search ? or(ilike(products.name, `%${search}%`), sql`exists (select 1 from product_variants pv where pv.product_id = ${products.id} and (pv.name ilike ${`%${search}%`} or pv.sku ilike ${`%${search}%`}))`) : undefined,
+    const where = and(eq(products.is_archived, false), search ? or(ilike(products.name, `%${search}%`), sql`exists (select 1 from product_variants pv where pv.product_id = ${products.id} and (pv.name ilike ${`%${search}%`} or pv.sku ilike ${`%${search}%`}))`) : undefined,
       variantFilter === "with" ? variantExists : variantFilter === "without" ? sql`not (${variantExists})` : undefined);
 
     const total_page = await db.query.products.findMany({
@@ -213,6 +213,7 @@ export abstract class ProductService {
           and(
             eq(products.id, product_id),
             eq(products.version, data.version || 0),
+            eq(products.is_archived, false),
           ),
         );
 
@@ -248,20 +249,6 @@ export abstract class ProductService {
     product_id: number,
     version: number,
   ): Promise<boolean> {
-    return await db.transaction(async (tx) => {
-      const [product] = await tx.select({ id: products.id }).from(products).where(and(eq(products.id, product_id), eq(products.version, version))).for("update");
-      if (!product) throw new WorkflowError("Product changed or no longer exists. Refresh before deleting.");
-      const [stock] = await tx.select({ id: inventory.id }).from(inventory).where(eq(inventory.product_id, product_id)).limit(1);
-      if (stock) throw new WorkflowError("Products linked to inventory cannot be deleted. Their stock and history must be retained.");
-      const result = await tx
-        .delete(products)
-        .where(and(eq(products.id, product_id), eq(products.version, version)));
-
-      if (result.count === 0) {
-        return false;
-      }
-
-      return true;
-    });
+    throw new WorkflowError("Archive this product and schedule deletion from Archives after the 30-day retention period.", 405);
   }
 }

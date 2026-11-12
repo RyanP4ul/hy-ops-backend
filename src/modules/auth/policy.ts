@@ -29,7 +29,7 @@ export function allowedOrigin(origin: string | null, requestUrl: string): boolea
 }
 
 const staffResources = new Set(["dashboard", "products", "product_variants", "inventory", "warehouses", "orders", "invoice", "deliveries", "vehicles", "fleet", "reports", "geocode", "geocoding", "delivery-estimates", "delivery-schedules", "sms", "lalamove"]);
-export const operationalSettings = new Set(["low_stock_threshold", "high_stock_threshold", "refresh_interval_ms", "is_form_validation_debug_enabled", "order_limit_per_day", "customer_order_limit", "max_order_per_vehicle", "returning_automatic_confirm_ms_interval", "mobile_automatic_refresh_interval_ms"]);
+export const operationalSettings = new Set(["low_stock_threshold", "high_stock_threshold", "refresh_interval_ms", "is_form_validation_debug_enabled", "order_limit_per_day", "customer_order_limit", "max_order_per_vehicle", "returning_automatic_confirm_ms_interval", "mobile_automatic_refresh_interval_ms", "mobile_offline_delivery_recording_enabled"]);
 
 /** Fail closed. Lookup exceptions support the existing staff order/delivery forms. */
 export function mayAccess(role: string, method: string, pathname: string): boolean {
@@ -37,8 +37,8 @@ export function mayAccess(role: string, method: string, pathname: string): boole
   if (role === "admin") return true;
   if (!["staff", "driver", "customer"].includes(role)) return false;
   if (path === "/ws" || (method === "GET" && path === "/notifications") || (method === "POST" && (path === "/notifications/mark-all-read" || /^\/notifications\/\d+\/read$/.test(path)))) return true;
-  if (role === "driver") return (method === "POST" && /^\/driver\/returns\/\d+\/collected$/.test(path)) || (method === "POST" && /^\/driver\/trips\/\d+\/start$/.test(path)) ||     ((method === "GET" || method === "POST") && /^\/driver\/stops\/\d+\/proofs$/.test(path)) ||
-    (method === "GET" && /^\/driver\/stops\/\d+\/proofs\/[0-9a-f-]{36}$/i.test(path)) || (method === "GET" && /^\/driver\/(profile|settings|trips(?:\/\d+)?|history)$/.test(path)) || (method === "POST" && /^\/driver\/stops\/\d+\/(delivered|failed)$/.test(path));
+  if (role === "driver") return (method === "GET" && /^\/driver\/sync\/(capabilities|operations\/[0-9a-f-]{36})$/i.test(path)) || (method === "POST" && /^\/driver\/returns\/\d+\/collected$/.test(path)) || (method === "POST" && /^\/driver\/trips\/\d+\/start$/.test(path)) ||     ((method === "GET" || method === "POST") && /^\/driver\/stops\/\d+\/proofs$/.test(path)) ||
+    (method === "GET" && /^\/driver\/stops\/\d+\/proofs\/[0-9a-f-]{36}$/i.test(path)) || (method === "GET" && /^\/driver\/(profile|settings|trips(?:\/\d+)?|history)$/.test(path)) || (method === "POST" && /^\/driver\/stops\/\d+\/(delivered|failed|plan)$/.test(path));
   if (role !== "staff") return false;
   if (path === "/lalamove/webhook/register") return false;
   if (method === "GET" && ["/users/customers", "/users/drivers", "/settings", "/settings/names"].includes(path)) return true;

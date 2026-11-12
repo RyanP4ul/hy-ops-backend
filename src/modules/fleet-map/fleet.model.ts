@@ -46,6 +46,8 @@ export const StopDto = t.Object({
   address: t.String(),
   coordinates: t.Tuple([t.Number(), t.Number()]),
   status: t.Union([t.Literal("pending"), t.Literal("completed")]),
+  skippedForNow: t.Optional(t.Boolean()),
+  deliverNext: t.Optional(t.Boolean()),
   order: OrderDto,
 });
 

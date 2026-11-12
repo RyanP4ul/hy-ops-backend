@@ -1,8 +1,12 @@
+import { stockTransaction } from "../inventory/transaction";
+import { commandHash, replayReceipt, saveReceipt } from "../driver/sync-receipts";
+import { activeUser, activeVehicle, activeWarehouse } from "../lifecycle/availability";
 import { and, asc, count, eq, inArray, ne, sql } from "drizzle-orm";
 import { db } from "../../db";
 import {
   customer_returns,
   customers,
+  warehouses,
   deliveries,
   deliveries_stops,
   drivers,
@@ -114,8 +118,7 @@ export class CustomerReturnService {
       reason = input.reason.trim();
     if (!reason || reason.length > 500)
       throw new WorkflowError("Enter a reason of up to 500 characters.", 400);
-    return db
-      .transaction(async (tx) => {
+    return stockTransaction(async (tx) => {
         const [identity] = await tx
           .select()
           .from(deliveries_stops)
@@ -154,6 +157,9 @@ export class CustomerReturnService {
           .from(customer_returns)
           .where(eq(customer_returns.order_id, order.id));
         if (existing) return { id: existing.id, status: existing.status };
+        const [home] = await tx.select({ id: warehouses.id }).from(warehouses).where(and(eq(warehouses.id, order.warehouse_id), activeWarehouse())).for("share");
+        if (!home) throw new WorkflowError("Activate the receiving warehouse before requesting a return pickup.");
+
         const [customer] = await tx
           .select({ name: users.name })
           .from(customers)
@@ -199,6 +205,7 @@ export class CustomerReturnService {
       .from(vehicles)
       .where(
         and(
+          activeVehicle(),
           eq(vehicles.warehouse_id, task.warehouse_id),
           inArray(vehicles.status, ["available", "on_delivery"]),
         ),
@@ -217,7 +224,7 @@ export class CustomerReturnService {
           eq(drivers.warehouse_id, task.warehouse_id),
           eq(drivers.status, "available"),
           eq(users.role, "driver"),
-          eq(users.is_archived, false),
+          activeUser(),
         ),
       );
     const fixes = new Map(
@@ -281,8 +288,7 @@ export class CustomerReturnService {
           inArray(deliveries.status, ["in_transit", "returning"]),
         ),
       );
-    return db
-      .transaction(async (tx) => {
+    return stockTransaction(async (tx) => {
         if (hint)
           await tx
             .select()
@@ -292,7 +298,7 @@ export class CustomerReturnService {
         const [vehicle] = await tx
           .select()
           .from(vehicles)
-          .where(eq(vehicles.id, input.vehicleId))
+          .where(and(eq(vehicles.id, input.vehicleId), activeVehicle()))
           .for("update");
         const [driver] = await tx
           .select()
@@ -326,7 +332,7 @@ export class CustomerReturnService {
             and(
               eq(users.id, input.driverId),
               eq(users.role, "driver"),
-              eq(users.is_archived, false),
+              activeUser(),
             ),
           );
         if (!account) throw new WorkflowError("Driver is unavailable.");
@@ -439,8 +445,9 @@ export class CustomerReturnService {
   static async collect(
     actorId: number,
     id: number,
-    input: { version: number; operationKey: string },
+    input: { version: number; operationKey: string; tripVersion?: number },
   ) {
+    const hash = commandHash("collected", id, { version: input.version, tripVersion: input.tripVersion });
     const [hint] = await db
       .select()
       .from(customer_returns)
@@ -448,8 +455,8 @@ export class CustomerReturnService {
     const assignedDeliveryId = hint?.assigned_delivery_id;
     if (!assignedDeliveryId)
       throw new WorkflowError("Assigned return pickup not found.", 404);
-    return db
-      .transaction(async (tx) => {
+    return stockTransaction(async (tx) => {
+        const receipt = await replayReceipt(tx, actorId, input.operationKey, hash);
         const [run] = await tx
           .select()
           .from(deliveries)
@@ -466,6 +473,7 @@ export class CustomerReturnService {
           task.assigned_delivery_id !== run.id
         )
           throw new WorkflowError("Assigned return pickup not found.", 404);
+        if (receipt) return receipt;
         if (
           ["collected", "received"].includes(task.status) &&
           task.collection_key === input.operationKey &&
@@ -475,6 +483,7 @@ export class CustomerReturnService {
         if (
           task.status !== "assigned" ||
           task.version !== input.version ||
+          (input.tripVersion !== undefined && run.version !== input.tripVersion) ||
           !["in_transit", "returning"].includes(run.status)
         )
           throw new WorkflowError(
@@ -519,7 +528,10 @@ export class CustomerReturnService {
             updated_at: now,
           })
           .where(eq(deliveries.id, run.id));
-        return { ok: true, deliveryId: run.id };
+        return saveReceipt(tx, actorId, input.operationKey, hash, {
+          ok: true, deliveryId: run.id, entityId: id, kind: "collected",
+          previousTripVersion: run.version, tripVersion: run.version + 1,
+        });
       })
       .catch(conflict);
   }

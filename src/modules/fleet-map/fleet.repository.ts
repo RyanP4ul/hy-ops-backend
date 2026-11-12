@@ -1,3 +1,4 @@
+import { activeWarehouse, activeVehicle } from "../lifecycle/availability";
 import { and, asc, desc, eq, inArray, or } from "drizzle-orm";
 import {
   customers,
@@ -24,12 +25,12 @@ export function listWarehouses() {
   return db
     .select()
     .from(warehouses)
-    .where(eq(warehouses.is_archived, false))
+    .where(activeWarehouse())
     .orderBy(asc(warehouses.id));
 }
 
 export function listVehicles() {
-  return db.select().from(vehicles).orderBy(asc(vehicles.id));
+  return db.select().from(vehicles).where(activeVehicle()).orderBy(asc(vehicles.id));
 }
 
 /**

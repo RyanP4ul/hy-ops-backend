@@ -10,6 +10,10 @@ import { calendarSeeds } from "./calendar";
 import { automationSeeds } from "./automation";
 // import { orderSeeds } from "./orders";
 
+const connectionString = process.env.DATABASE_URL;
+
+console.log('Seed connectionString: ' + connectionString);
+
 async function run() {
   try {
     // WARNING: Deletes existing records.

@@ -1,3 +1,5 @@
+import { LifecycleService } from "../lifecycle/service";
+import { activeUser, activeWarehouse, operationalUser } from "../lifecycle/availability";
 import { revokeLiveSessions } from "../../utils/session-events";
 import { WorkflowError } from "../../utils/workflow-error";
 import { and, count, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
@@ -24,7 +26,7 @@ export abstract class UserService {
   static async getMutationActor(id: number) {
     return db.query.users.findFirst({
       columns: { id: true, role: true, token_version: true },
-      where: and(eq(users.id, id), eq(users.is_archived, false)),
+      where: and(eq(users.id, id), operationalUser()),
     });
   }
 
@@ -48,6 +50,8 @@ export abstract class UserService {
         role: users.role,
         last_login: users.last_login,
         version: users.version,
+        is_active: users.is_active,
+        is_operational: sql<boolean>`${operationalUser()}`,
 
         staff: {
           id: staffs.id,
@@ -113,7 +117,7 @@ export abstract class UserService {
 
   static async getCustomers(page = 0, limit = 10, search = "", contact?: "phone" | "email") {
     const filters = and(
-      eq(users.role, "customer"), eq(users.is_archived, false),
+      eq(users.role, "customer"), activeUser(),
       sql`${users.email} <> 'walkin@system.local'`,
       sql`${customers.id} is not null`,
       search ? or(ilike(users.name, `%${search}%`), ilike(customers.company_name, `%${search}%`), ilike(customers.phone_number, `%${search}%`), ilike(users.email, `%${search}%`)) : undefined,
@@ -188,7 +192,7 @@ export abstract class UserService {
     if (!email) return null;
 
     const user = await db.query.users.findFirst({
-      where: and(eq(users.email, email), eq(users.is_archived, false)),
+      where: and(eq(users.email, email), operationalUser()),
     });
 
     if (!user) {
@@ -202,7 +206,7 @@ export abstract class UserService {
     if (!id) return null;
 
     const user = await db.query.users.findFirst({
-      where: and(eq(users.id, Number(id)), eq(users.is_archived, false)),
+      where: and(eq(users.id, Number(id)), operationalUser()),
     });
 
     if (!user) {
@@ -322,6 +326,11 @@ export abstract class UserService {
   static async createUser(data: UserType, actor: MutationActor) {
     return await db.transaction(async (tx) => {
       await lockUserMutation(tx, actor);
+      if (data.role === "staff" || data.role === "driver") {
+        const [warehouse] = await tx.select({ id: warehouses.id }).from(warehouses).where(and(eq(warehouses.id, data.profile?.warehouse_id ?? 0), activeWarehouse())).for("share");
+        if (!warehouse) throw new WorkflowError("Choose an active warehouse.");
+      }
+
       const password_hash = data.password
         ? await bcrypt.hash(data.password, 10)
         : null;
@@ -401,6 +410,11 @@ export abstract class UserService {
     let accessChanged = false;
     const result = await db.transaction(async (tx) => {
       await lockUserMutation(tx, actor);
+      if (data.role === "staff" || data.role === "driver") {
+        const [warehouse] = await tx.select({ id: warehouses.id }).from(warehouses).where(and(eq(warehouses.id, data.profile?.warehouse_id ?? 0), activeWarehouse())).for("share");
+        if (!warehouse) throw new WorkflowError("Choose an active warehouse.");
+      }
+
       const [existing_user] = await tx.select().from(users)
         .where(and(eq(users.id, id), eq(users.is_archived, false))).for("update");
 
@@ -556,7 +570,7 @@ export abstract class UserService {
   static async deleteUser(_id: number, _version: number) {
     // Cascading profile/history foreign keys make hard deletion unsafe until a
     // retention policy and restrictive foreign keys have been deployed.
-    throw new UserMutationError("Permanent deletion is disabled to preserve account history. Deactivate the user instead.");
+    throw new UserMutationError("Permanent deletion is disabled on active accounts. Archive the user and schedule deletion from Archives after the 30-day retention period.");
   }
 
   static async archiveUser(
@@ -565,32 +579,7 @@ export abstract class UserService {
     version: number,
     actor: MutationActor,
   ) {
-    return db.transaction(async (tx) => {
-      await lockUserMutation(tx, actor);
-      assertOtherAccount(actor.id, target_user_id);
-      const now = Math.floor(Date.now() / 1000);
-      const [user] = await tx.update(users).set({
-        is_archived: true,
-        archived_at: now,
-        updated_at: now,
-        version: sql`${users.version} + 1`,
-        token_version: sql`${users.token_version} + 1`,
-        refresh_token: null,
-      }).where(and(eq(users.id, target_user_id), eq(users.version, version), eq(users.is_archived, false)))
-        .returning({ id: users.id, name: users.name });
-      if (!user) throw new UserMutationError("User not found or version mismatch.");
-      const [archive] = await tx.insert(archives).values({
-        entity_id: String(target_user_id), entity_type: "users",
-        archived_by: actor.id, archived_at: now,
-      }).returning({ id: archives.id });
-      await tx.insert(audit_logs).values({
-        user_id: actor.id, action: "USER_DEACTIVATED", entity_type: "users",
-        entity_id: String(target_user_id), description: `User ${user.name} deactivated`,
-        old_value: JSON.stringify({ is_archived: false }), new_value: JSON.stringify({ is_archived: true }),
-        metadata: JSON.stringify({ archiveId: archive.id }), ip_address: "unknown", user_agent: "unknown", created_at: now,
-      });
-      return { id: archive.id, message: `User ${user.name} deactivated successfully` };
-    }).then((result) => { revokeLiveSessions(target_user_id); return result; });
+    return LifecycleService.change("users", target_user_id, version, "archive", actor);
   }
 
   static async revokeSession(userId: number, tokenVersion: number) {
@@ -606,7 +595,7 @@ export abstract class UserService {
         .set({
           token_version: sql`${users.token_version} + 1`,
         })
-        .where(and(eq(users.id, userId), eq(users.is_archived, false)))
+        .where(and(eq(users.id, userId), operationalUser()))
         .returning();
 
       if (!user) throw new Error("Account is unavailable.");
@@ -641,7 +630,7 @@ export abstract class UserService {
       .where(
         and(
           eq(users.role, "driver"),
-          eq(users.is_archived, false),
+          operationalUser(),
           eq(drivers.status, "available"),
           is_search_empty ? undefined : whereQuery,
           warehouse_id !== -1
@@ -663,7 +652,7 @@ export abstract class UserService {
         and(
           eq(users.role, "driver"),
           eq(drivers.status, "available"),
-          eq(users.is_archived, false),
+          operationalUser(),
           is_search_empty ? undefined : whereQuery,
           warehouse_id !== -1
             ? eq(drivers.warehouse_id, warehouse_id)

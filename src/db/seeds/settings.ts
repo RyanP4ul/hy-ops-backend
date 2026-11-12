@@ -4,6 +4,10 @@ import { SettingInsert, settings } from "../schema/settings";
 
 const setting_lists: SettingInsert[] = [
   {
+    name: "mobile_offline_delivery_recording_enabled", value: "false",
+    created_at: Math.floor(Date.now() / 1000), updated_at: Math.floor(Date.now() / 1000),
+  },
+  {
     name: "returning_automatic_confirm_ms_interval",
     value: "100", // Metres; the setting key is retained for compatibility.
     created_at: Math.floor(Date.now() / 1000),

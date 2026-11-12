@@ -1,3 +1,5 @@
+import { stockTransaction } from "../inventory/transaction";
+import { activeWarehouse, activeVehicle } from "../lifecycle/availability";
 import { CustomerReturnService } from "../deliveries/customer-returns";
 import { DeliveryService } from "../deliveries/service";
 import type { AssignmentActor } from "../deliveries/scope";
@@ -53,20 +55,15 @@ export async function assignVehicleWarehouse(
   vehicleId: number,
   warehouseId: number,
 ) {
-  const [warehouse] = await db
-    .select({ id: warehouses.id })
-    .from(warehouses)
-    .where(
-      and(eq(warehouses.id, warehouseId), eq(warehouses.is_archived, false)),
-    );
-  if (!warehouse) throw new Error("Warehouse not found");
-
-  await db.transaction(async (tx) => {
-    const [vehicle] = await tx.select().from(vehicles).where(eq(vehicles.id, vehicleId)).for("update");
+  await stockTransaction(async (tx) => {
+    const [warehouse] = await tx.select({ id: warehouses.id }).from(warehouses)
+      .where(and(eq(warehouses.id, warehouseId), activeWarehouse())).for("share");
+    if (!warehouse) throw new WorkflowError("Choose an active warehouse.");
+    const [vehicle] = await tx.select().from(vehicles).where(and(eq(vehicles.id, vehicleId), activeVehicle())).for("update");
     if (!vehicle || vehicle.status !== "available") throw new WorkflowError("Vehicle is not available for reassignment.");
     const [trip] = await tx.select({ id: deliveries.id }).from(deliveries).where(and(eq(deliveries.vehicle_id, vehicleId), inArray(deliveries.status, ["scheduled", "in_transit", "returning"])));
     if (trip) throw new WorkflowError("Reassign or complete scheduled/active trips before changing the home warehouse.");
-    await tx.update(vehicles).set({ warehouse_id: warehouseId, version: sql`${vehicles.version} + 1`, updated_at: nowEpochSeconds() }).where(eq(vehicles.id, vehicleId));
+    await tx.update(vehicles).set({ warehouse_id: warehouseId, version: sql`${vehicles.version} + 1`, updated_at: nowEpochSeconds() }).where(and(eq(vehicles.id, vehicleId), activeVehicle()));
   });
 
   return { ok: true as const };
@@ -101,7 +98,7 @@ export async function recordPosition(
   const [vehicle] = await db
     .select({ id: vehicles.id })
     .from(vehicles)
-    .where(eq(vehicles.id, vehicleId));
+    .where(and(eq(vehicles.id, vehicleId), activeVehicle()));
   if (!vehicle) throw new Error("Vehicle not found");
 
   const recordedAt = body.recordedAt ? new Date(body.recordedAt) : new Date();

@@ -2,7 +2,7 @@ import Elysia, { t } from "elysia";
 import { orderModel, savedShippingAddressSchema } from "./model";
 import { OrderService } from "./service";
 import { AuthUser } from "../auth/schema";
-import { staffWarehouse, assertOrderScope } from "../deliveries/scope";
+import { staffWarehouse, assertOrderScope, assignOrderWarehouse } from "../deliveries/scope";
 import { WorkflowError } from "../../utils/workflow-error";
 import { LalamoveService } from "../lalamove/service";
 
@@ -16,7 +16,7 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     params: t.Object({ customerId: t.Numeric({ minimum: 1 }) }),
     body: savedShippingAddressSchema,
   })
-  .get("/", async ({ query, set }) => {
+  .get("/", async ({ query, set, user }) => {
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;
     const search = query.search ? query.search.trim() : "";
@@ -30,6 +30,7 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
       delivery_type,
       sort_by,
       query.status ?? "",
+      await staffWarehouse(user),
     );
 
     set.headers["X-Total-Count"] = result.total;
@@ -38,7 +39,8 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   }, { detail: { summary: 'List root', description: 'GET endpoint for root in the orders module.', tags: ['Orders'] } })
   .get(
     "/:id",
-    async ({ params }) => {
+    async ({ params, user }) => {
+      await assertOrderScope(params.id, await staffWarehouse(user));
       const orderDetail = await OrderService.getOrderById(params.id);
 
       if (!orderDetail) {
@@ -55,14 +57,13 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     },
   )
   .get("/groups/:groupId/ready", async ({ params, query, user }) => {
-    const assigned = await staffWarehouse(user);
-    if (assigned !== undefined && assigned !== query.warehouse_id) throw new WorkflowError("Choose your assigned warehouse.", 403);
-    return OrderService.getReadyOrderGroup(params.groupId, assigned ?? query.warehouse_id);
+    const assigned = await assignOrderWarehouse(user, query);
+    return OrderService.getReadyOrderGroup(params.groupId, assigned.warehouse_id);
   }, {
-      detail: { summary: 'Get groups by groupId ready', description: 'GET endpoint for groups by groupId ready in the orders module.', tags: ['Orders'] }, params: t.Object({ groupId: t.String({ format: "uuid" }) }), query: t.Object({ warehouse_id: t.Numeric({ minimum: 1 }) }) })
-  .get("/details", async ({ query }) => {
+      detail: { summary: 'Get groups by groupId ready', description: 'GET endpoint for groups by groupId ready in the orders module.', tags: ['Orders'] }, params: t.Object({ groupId: t.String({ format: "uuid" }) }), query: t.Object({ warehouse_id: t.Optional(t.Numeric({ minimum: 1 })) }) })
+  .get("/details", async ({ query, user }) => {
     const order_ids = query.ids ? query.ids.split(",").map(Number) : [];
-    return await OrderService.getOrderDetailsByIds(order_ids);
+    return await OrderService.getOrderDetailsByIds(order_ids, await staffWarehouse(user));
   }, { detail: { summary: 'Get details', description: 'GET endpoint for details in the orders module.', tags: ['Orders'] } })
   .get(
     "/eligibility/:customerId",
@@ -73,7 +74,10 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
       params: t.Object({ customerId: t.Numeric({ minimum: 1 }) }),
     },
   )
-  .put("/:id", ({ params, body }) => OrderService.updateNotes(params.id, body.version, body.notes), {
+  .put("/:id", async ({ params, body, user }) => {
+    await assertOrderScope(params.id, await staffWarehouse(user));
+    return OrderService.updateNotes(params.id, body.version, body.notes);
+  }, {
       detail: { summary: 'Update by id', description: 'PUT endpoint for by id in the orders module.', tags: ['Orders'] },
     params: t.Object({ id: t.Numeric({ minimum: 1 }) }), body: t.Object({ version: t.Integer({ minimum: 1 }), notes: t.String({ maxLength: 2000 }) }),
   })
@@ -83,11 +87,9 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     body: t.Object({ version: t.Integer({ minimum: 1 }), latitude: t.Number({ minimum: -90, maximum: 90 }), longitude: t.Number({ minimum: -180, maximum: 180 }) }),
   })
   .post("/batch", async ({ body, user }) => {
-    const warehouseId = await staffWarehouse(user);
-    if (warehouseId !== undefined && body.orders.some(order => order.warehouse_id !== warehouseId)) {
-      throw new WorkflowError("All orders must use your assigned warehouse.", 403);
-    }
-    const created = await OrderService.createOrders(body);
+    const created = body.payment_mode === "COMBINED"
+      ? await OrderService.createOrders({ ...body, orders: await Promise.all(body.orders.map(order => assignOrderWarehouse(user, order))) })
+      : await OrderService.createOrders({ ...body, orders: await Promise.all(body.orders.map(order => assignOrderWarehouse(user, order))) });
     const rows = await Promise.all(created.map(order => OrderService.getOrderTableRowById(order.id)));
     if (rows.some(row => !row)) throw new Error("Failed to load created orders.");
     return { orders: rows, message: `${rows.length} orders created successfully.` };
@@ -97,7 +99,7 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     "/walk-in",
     async ({ body, user }) => {
       const warehouseId = await staffWarehouse(user);
-      const result = await OrderService.createWalkInOrder(body, warehouseId);
+      const result = await OrderService.createWalkInOrder(await assignOrderWarehouse(user, body), warehouseId);
       const order = await OrderService.getOrderTableRowById(result.id);
       if (!order) throw new Error("Failed to load created walk-in order.");
       return {
@@ -115,8 +117,8 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   )
   .post(
     "/",
-    async ({ body, set }) => {
-      const result = await OrderService.createOrder(body);
+    async ({ body, user }) => {
+      const result = await OrderService.createOrder(await assignOrderWarehouse(user, body));
       const order = await OrderService.getOrderTableRowById(result.id);
       if (!order) throw new Error("Failed to load created order.");
       return order;
@@ -128,7 +130,8 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   )
   .post(
     "/process/:id",
-    async ({ query, params }) => {
+    async ({ query, params, user }) => {
+      await assertOrderScope(params.id, await staffWarehouse(user));
       const result = await OrderService.processOrder(params.id, query.version);
       const order = await OrderService.getOrderTableRowById(result.id);
 
@@ -148,7 +151,8 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   )
   .post(
     "/delivery/:id",
-    async ({ query, params }) => {
+    async ({ query, params, user }) => {
+      await assertOrderScope(params.id, await staffWarehouse(user));
       const result = await OrderService.deliveryOrder(params.id, query.version);
       const order = await OrderService.getOrderTableRowById(result.id);
 
@@ -168,7 +172,8 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   )
   .post(
     "/cancel/:id",
-    async ({ query, params }) => {
+    async ({ query, params, user }) => {
+      await assertOrderScope(params.id, await staffWarehouse(user));
       const result = await OrderService.cancelOrder(params.id, query.version);
       const order = await OrderService.getOrderTableRowById(result.id);
 

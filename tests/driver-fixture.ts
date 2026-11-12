@@ -17,7 +17,7 @@ export async function seedDriverFixture(sql: any) {
     await sql`insert into staffs(user_id,warehouse_id) values(2,1)`;
     await sql`insert into drivers(user_id,warehouse_id,phone_number) values(3,1,'09000000001'),(4,2,'09000000002')`;
     await sql`insert into customers(user_id,company_name,phone_number) values(5,'Company','09000000000')`;
-    await sql`insert into vehicles(warehouse_id,plate_number,type,image,created_at,updated_at) values(1,'AAA-001','truck','',0,0),(2,'BBB-002','van','',0,0)`;
+    await sql`insert into vehicles(warehouse_id,plate_number,type,created_at,updated_at) values(1,'AAA-001','truck',0,0),(2,'BBB-002','van',0,0)`;
     await sql`insert into products(name) values('Product')`;
     await sql`insert into product_variants(product_id,name,sku,price,unit) values(1,'Variant','SKU',99,'piece')`;
     await sql`insert into inventory(warehouse_id,product_id,product_variant_id,quantity,reserved,created_at,updated_at) values(1,1,1,10,2,0,0),(2,1,1,10,2,0,0)`;

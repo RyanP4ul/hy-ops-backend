@@ -1,3 +1,4 @@
+import { activeInventory, activeWarehouse } from "../lifecycle/availability";
 import { WorkflowError } from "../../utils/workflow-error";
 import { stockTransaction } from "./transaction";
 import { stock_movements, users } from "../../db/schema";
@@ -42,7 +43,7 @@ export abstract class InventoryService {
       suggested: sql<number>`greatest(${threshold} + 1 - (${inventory.quantity} - ${inventory.reserved}), 0)` })
       .from(inventory).innerJoin(product_variants, eq(product_variants.id, inventory.product_variant_id))
       .innerJoin(warehouses, eq(warehouses.id, inventory.warehouse_id))
-      .where(and(lte(sql`${inventory.quantity} - ${inventory.reserved}`, threshold), warehouseId === null ? undefined : eq(inventory.warehouse_id, warehouseId))).orderBy(inventory.id);
+      .where(and(activeInventory(), lte(sql`${inventory.quantity} - ${inventory.reserved}`, threshold), warehouseId === null ? undefined : eq(inventory.warehouse_id, warehouseId))).orderBy(inventory.id);
     return { threshold, rows };
   }
 
@@ -57,7 +58,7 @@ export abstract class InventoryService {
       out: sql<number>`count(*) filter (where ${available} <= 0)`.mapWith(Number),
       reserved: sql<number>`coalesce(sum(${inventory.reserved}), 0)`.mapWith(Number),
       available: sql<number>`coalesce(sum(${available}), 0)`.mapWith(Number),
-    }).from(inventory).where(warehouseId === null ? undefined : eq(inventory.warehouse_id, warehouseId));
+    }).from(inventory).where(and(activeInventory(), warehouseId === null ? undefined : eq(inventory.warehouse_id, warehouseId)));
     return { ...summary, threshold, warehouseId };
   }
 
@@ -73,6 +74,8 @@ export abstract class InventoryService {
         quantity: inventory.quantity,
         price: product_variants.price,
         version: inventory.version,
+        is_active: inventory.is_active,
+        is_operational: sql<boolean>`${activeInventory()}`,
       })
       .from(inventory)
       .leftJoin(warehouses, eq(inventory.warehouse_id, warehouses.id))
@@ -94,6 +97,7 @@ export abstract class InventoryService {
     warehouse_id: number | null = null,
     from: number | null = null,
     to: number | null = null,
+    activeOnly = false,
   ) {
     const is_search_empty = search.length === 0;
     const offset = is_search_empty ? Math.max(page * limit, 0) : 0;
@@ -145,6 +149,9 @@ export abstract class InventoryService {
     }
 
     const whereQuery = and(
+      eq(inventory.is_archived, false),
+      activeOnly || stock_status !== "all" ? activeInventory() : undefined,
+      sql`exists (select 1 from warehouses lifecycle_w where lifecycle_w.id = ${inventory.warehouse_id} and not lifecycle_w.is_archived)`,
       searchQuery,
       stockStatusQuery,
       from !== null ? gte(inventory.created_at, from) : undefined,
@@ -177,6 +184,8 @@ export abstract class InventoryService {
         quantity: inventory.quantity,
         price: product_variants.price,
         version: inventory.version,
+        is_active: inventory.is_active,
+        is_operational: sql<boolean>`${activeInventory()}`,
       })
       .from(inventory)
       .leftJoin(warehouses, eq(inventory.warehouse_id, warehouses.id))
@@ -223,6 +232,9 @@ export abstract class InventoryService {
       const [variant] = await tx.select({ product_id: product_variants.product_id }).from(product_variants)
         .where(eq(product_variants.id, data.product_variant_id));
       if (!variant) throw new WorkflowError("Product variant not found.");
+      const [product] = await tx.select().from(products).where(and(eq(products.id, variant.product_id), eq(products.is_active, true), eq(products.is_archived, false))).for("share");
+      const [warehouse] = await tx.select().from(warehouses).where(and(eq(warehouses.id, data.warehouse_id), activeWarehouse())).for("share");
+      if (!product || !warehouse) throw new WorkflowError("Choose an active product and warehouse.");
       const now = Math.floor(Date.now() / 1000);
       const result = await tx.insert(inventory).values({ ...data, product_id: variant.product_id, created_at: now, updated_at: now })
         .onConflictDoNothing().returning();
@@ -236,6 +248,8 @@ export abstract class InventoryService {
     return stockTransaction(async (tx) => {
       const [current] = await tx.select().from(inventory).where(eq(inventory.id, inventory_id)).for("update");
       if (!current || current.version !== data.version) throw new WorkflowError("Inventory not found or version mismatch.");
+      const [eligible] = await tx.select({ id: inventory.id }).from(inventory).where(and(eq(inventory.id, inventory_id), activeInventory()));
+      if (!eligible) throw new WorkflowError("Activate the stock, product and warehouse before adjusting inventory.");
       if (current.warehouse_id !== data.warehouse_id || current.product_variant_id !== data.product_variant_id) {
         throw new WorkflowError("An inventory record's warehouse and variant cannot be changed. Create a separate record instead.");
       }
@@ -250,17 +264,7 @@ export abstract class InventoryService {
   }
 
   static async deleteInventory(id: number, version: number) {
-    return stockTransaction(async (tx) => {
-      const [current] = await tx.select().from(inventory).where(eq(inventory.id, id)).for("update");
-      if (!current || current.version !== version) throw new WorkflowError("Inventory not found or version mismatch.");
-      if (current.quantity !== 0 || current.reserved !== 0) throw new WorkflowError("Only empty, unreserved inventory can be deleted.");
-      const [reference] = await tx.select({ id: order_items.id }).from(order_items).where(eq(order_items.inventory_id, id)).limit(1);
-      if (reference) throw new WorkflowError("This inventory is referenced by order history and cannot be deleted.");
-      const [movement] = await tx.select({ id: stock_movements.id }).from(stock_movements).where(eq(stock_movements.inventory_id, id)).limit(1);
-      if (movement) throw new WorkflowError("Inventory movement history must be retained.");
-      await tx.delete(inventory).where(eq(inventory.id, id));
-      return { message: `Inventory with ID ${id} deleted successfully.` };
-    });
+    throw new WorkflowError("Archive this inventory and schedule deletion from Archives after the 30-day retention period.", 405);
   }
 
   static async getInventoryNames(
@@ -276,7 +280,7 @@ export abstract class InventoryService {
       })
       .from(inventory)
       .where(
-        and(gt(sql`${inventory.quantity} - ${inventory.reserved}`, 0), warehouse_id !== -1 ? eq(inventory.warehouse_id, warehouse_id) : undefined),
+        and(activeInventory(), gt(sql`${inventory.quantity} - ${inventory.reserved}`, 0), warehouse_id !== -1 ? eq(inventory.warehouse_id, warehouse_id) : undefined),
       );
 
     const result = await db
@@ -297,6 +301,7 @@ export abstract class InventoryService {
       .limit(limit)
       .where(
         and(
+          activeInventory(),
           gt(sql`${inventory.quantity} - ${inventory.reserved}`, 0),
           warehouse_id !== -1
             ? eq(inventory.warehouse_id, warehouse_id)
@@ -310,7 +315,7 @@ export abstract class InventoryService {
     };
   }
 
-  static async getInventoryDetailById(ids: number[]) {
+  static async getInventoryDetailById(ids: number[], warehouseId?: number) {
     const result = await db
       .select({
         inventory_id: inventory.id,
@@ -327,7 +332,7 @@ export abstract class InventoryService {
         product_variants,
         eq(inventory.product_variant_id, product_variants.id),
       )
-      .where(inArray(inventory.id, ids));
+      .where(and(activeInventory(), inArray(inventory.id, ids), warehouseId === undefined ? undefined : eq(inventory.warehouse_id, warehouseId)));
 
     return result;
   }

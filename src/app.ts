@@ -1,3 +1,5 @@
+import { startArchiveRetentionWorker } from "./modules/archives/retention";
+import { lifecycleRoutes } from "./modules/lifecycle";
 import { openapi } from '@elysia/openapi'
 import type { SmsGateway } from "./modules/sms/service";
 import { startDeliveryNotificationWorker } from "./modules/deliveries/notification-worker";
@@ -43,6 +45,7 @@ import { dashboardRoutes } from "./modules/dashboard";
 import { AuditLogService } from "./modules/audit_logs/service";
 import { automationRoutes } from "./modules/automations";
 import { startBackupScheduler } from "./modules/automations/backup-service";
+import { startReportScheduler } from "./modules/automations/report-service";
 import { createSmsRoutes } from "./modules/sms";
 import { deliveryEstimateRoutes } from "./modules/delivery-expenses";
 import { geocodingRoutes } from "./modules/geocode";
@@ -62,7 +65,9 @@ export function createApp(
   const authenticatedClaims = new WeakMap<Request, Record<string, any>>();
   let driverEvents: Awaited<ReturnType<typeof startDriverEvents>> | undefined;
   let deliveryNotifications: ReturnType<typeof startDeliveryNotificationWorker> | undefined;
+  let retentionWorker: ReturnType<typeof startArchiveRetentionWorker> | undefined;
   let backupScheduler: Awaited<ReturnType<typeof startBackupScheduler>> | undefined;
+  let reportScheduler: Awaited<ReturnType<typeof startReportScheduler>> | undefined;
   let lalamoveWorker: ReturnType<typeof startLalamoveWorker> | undefined;
   return (
     new Elysia()
@@ -76,14 +81,16 @@ export function createApp(
         if (options.externalIntegrations !== false) deliveryNotifications = startDeliveryNotificationWorker(options.sms, options.emailSender);
         if (options.externalIntegrations !== false) lalamoveWorker = startLalamoveWorker();
         if (options.automation !== false) {
+          retentionWorker = startArchiveRetentionWorker();
           await startAutomationTasks();
           if (options.externalIntegrations !== false) backupScheduler = await startBackupScheduler();
+          if (options.externalIntegrations !== false) reportScheduler = await startReportScheduler();
         }
-		
-		console.log(`${process.env.NODE_ENV}: ${process.env.FRONTEND_URL}`);
       })
       .onStop(async () => {
+        await retentionWorker?.stop();
         backupScheduler?.stop();
+        reportScheduler?.stop();
         await lalamoveWorker?.stop();
         await deliveryNotifications?.stop();
         await driverEvents?.stop();
@@ -95,7 +102,7 @@ export function createApp(
       .onError(({ error, set, code }) => {
         if (error instanceof WorkflowError) {
           set.status = error.status;
-          return { message: error.message };
+          return { message: error.message, code: error.code };
         }
         if (code === "VALIDATION") {
           set.status = 400;
@@ -288,6 +295,7 @@ export function createApp(
             .use(ws)
             .use(options.proofs ? createDriverRoutes(options.proofs) : driverRoutes)
             .use(dashboardRoutes)
+            .use(lifecycleRoutes)
             .use(productRoutes)
             .use(productVariantRoutes)
             .use(inventoryRoutes)

@@ -40,7 +40,7 @@ export abstract class PaymentService {
     if (amount <= 0n || !data.reason.trim()) throw new WorkflowError("A positive refund amount and a reason are required.");
     return db.transaction(async (tx) => {
       const [actor] = await tx.select().from(users).where(eq(users.id, actorId)).for("update");
-      if (!actor || actor.is_archived || actor.role !== "admin") throw new WorkflowError("Only an active administrator can record refunds.", 403);
+      if (!actor || !actor.is_active || actor.is_archived || actor.role !== "admin") throw new WorkflowError("Only an active administrator can record refunds.", 403);
       const [payment] = await tx.select().from(payments).where(eq(payments.payment_number, data.payment_number)).for("update");
       if (!payment) throw new WorkflowError("Payment not found.", 404);
       const [prior] = await tx.select().from(payment_refunds).where(eq(payment_refunds.request_id, data.request_id));

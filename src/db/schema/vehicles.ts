@@ -1,4 +1,4 @@
-import { integer, pgEnum, pgTable, varchar } from "drizzle-orm/pg-core";
+import { boolean, integer, pgEnum, pgTable, varchar } from "drizzle-orm/pg-core";
 import { warehouses } from "./warehouses";
 
 export const vehicleStatusEnum = pgEnum("vehicle_status_enum", [
@@ -25,7 +25,9 @@ export const vehicles = pgTable("vehicles", {
   plate_number: varchar({ length: 255 }).notNull().unique(),
   status: vehicleStatusEnum().notNull().default("available"),
   type: vehicleTypeEnum().notNull().default("truck"),
-  image: varchar({ length: 255 }).notNull(),
+  is_archived: boolean().notNull().default(false),
+  archived_at: integer(),
+  is_active: boolean().notNull().default(true),
   version: integer().notNull().default(1),
   created_at: integer().notNull(),
   updated_at: integer().notNull(),

@@ -1,3 +1,6 @@
+import { LifecycleService } from "../lifecycle/service";
+import { activeWarehouse } from "../lifecycle/availability";
+import { users } from "../../db/schema";
 import { WorkflowError } from "../../utils/workflow-error";
 import { db } from "@/db/index";
 import { warehouses } from "@/db/schema/warehouses";
@@ -46,6 +49,7 @@ export abstract class WarehouseService {
           state: warehouses.state,
           zip_code: warehouses.zip_code,
           version: warehouses.version,
+          is_active: warehouses.is_active,
           created_at: warehouses.created_at,
           updated_at: warehouses.updated_at,
         })
@@ -85,7 +89,7 @@ export abstract class WarehouseService {
   ) {
     const is_search_empty = search.length === 0;
     const offset = Math.max(page * limit, 0);
-    const is_archived_query = eq(warehouses.is_archived, false);
+    const is_archived_query = activeWarehouse();
 
     const whereQuery = !is_search_empty
       ? and(ilike(warehouses.name, `%${search}%`), is_archived_query)
@@ -276,116 +280,18 @@ export abstract class WarehouseService {
   }
 
   static async deleteWarehouse(id: number, version: number) {
-    return db.transaction(async (tx) => {
-      const [warehouse] = await tx
-        .select()
-        .from(warehouses)
-        .where(and(eq(warehouses.id, id), eq(warehouses.is_archived, false)))
-        .for("update");
-      if (!warehouse || warehouse.version !== version)
-        throw new WorkflowError(
-          "Warehouse changed or was removed. Refresh before retrying.",
-        );
-      const references = await Promise.all([
-        tx
-          .select({ id: inventory.id })
-          .from(inventory)
-          .where(eq(inventory.warehouse_id, id))
-          .limit(1),
-        tx
-          .select({ id: vehicles.id })
-          .from(vehicles)
-          .where(eq(vehicles.warehouse_id, id))
-          .limit(1),
-        tx
-          .select({ id: drivers.id })
-          .from(drivers)
-          .where(eq(drivers.warehouse_id, id))
-          .limit(1),
-        tx
-          .select({ id: staffs.id })
-          .from(staffs)
-          .where(eq(staffs.warehouse_id, id))
-          .limit(1),
-        tx
-          .select({ id: orders.id })
-          .from(orders)
-          .where(or(eq(orders.warehouse_id, id), eq(orders.lalamove_pickup_warehouse_id, id)))
-          .limit(1),
-      ]);
-      if (references.some((rows) => rows.length))
-        throw new WorkflowError(
-          "Warehouse has linked stock, people, vehicles or orders. Archive it to retain history.",
-        );
-      await tx.delete(warehouses).where(eq(warehouses.id, id));
-      return { message: "Warehouse deleted." };
-    });
+    throw new WorkflowError("Archive this record and schedule deletion from Archives after the 30-day retention period.", 405);
   }
 
   static async archiveWarehouse(
     user_id: number,
     warehouse_id: number,
     version: number,
+    tokenVersion?: number,
   ) {
-    return db.transaction(async (tx) => {
-      const [warehouse] = await tx
-        .select()
-        .from(warehouses)
-        .where(
-          and(
-            eq(warehouses.id, warehouse_id),
-            eq(warehouses.is_archived, false),
-          ),
-        )
-        .for("update");
-      if (!warehouse || warehouse.version !== version)
-        throw new WorkflowError(
-          "Warehouse changed or was archived. Refresh before retrying.",
-        );
-      const [active] = await tx
-        .select({ id: orders.id })
-        .from(orders)
-        .where(
-          and(
-            or(eq(orders.warehouse_id, warehouse_id), eq(orders.lalamove_pickup_warehouse_id, warehouse_id)),
-            inArray(orders.status, [
-              "PENDING",
-              "PROCESSING",
-              "SCHEDULING",
-              "SCHEDULED",
-              "IN_TRANSIT",
-            ]),
-          ),
-        )
-        .limit(1);
-      if (active)
-        throw new WorkflowError(
-          "Complete or cancel the warehouse's active orders before archiving.",
-        );
-      const now = Math.floor(Date.now() / 1000);
-      await tx
-        .update(warehouses)
-        .set({
-          is_archived: true,
-          archived_at: now,
-          updated_at: now,
-          version: warehouse.version + 1,
-        })
-        .where(eq(warehouses.id, warehouse_id));
-      const [archive] = await tx
-        .insert(archives)
-        .values({
-          entity_id: String(warehouse_id),
-          entity_type: "warehouses",
-          archived_by: user_id,
-          archived_at: now,
-        })
-        .returning({ id: archives.id });
-      return {
-        id: archive?.id,
-        message: "Warehouse archived; history retained.",
-      };
-    });
+    const actor = await db.query.users.findFirst({ where: eq(users.id, user_id) });
+    if (!actor) throw new WorkflowError("Administrator not found.", 403);
+    return LifecycleService.change("warehouses", warehouse_id, version, "archive", { id: user_id, tokenVersion: tokenVersion ?? actor.token_version });
   }
 }
 

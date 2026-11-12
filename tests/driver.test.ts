@@ -9,6 +9,7 @@ test("driver routes are narrow; staff can schedule without gaining administrativ
   expect(mayAccess("driver", "GET", "/settings")).toBe(false);
   expect(mayAccess("driver", "GET", "/driver/trips/123")).toBe(true);
   expect(mayAccess("driver", "POST", "/driver/stops/1/failed")).toBe(true);
+  expect(mayAccess("driver", "POST", "/driver/stops/1/plan")).toBe(true);
   for (const path of ["/deliveries", "/orders", "/payments", "/driver/trips/1/dispatch"]) expect(mayAccess("driver", "POST", path)).toBe(false);
   expect(mayAccess("staff", "GET", "/driver/trips")).toBe(false);
   expect(mayAccess("staff", "POST", "/deliveries")).toBe(true);
@@ -59,6 +60,76 @@ describe.skipIf(!testUrl)("real database driver integration", () => {
     const tokens = await response.json();
     return `access_token=${tokens.access_token}; refresh_token=${tokens.refresh_token}`;
   }
+  test("grouped stop planning syncs driver and fleet reads without changing outcomes", async () => {
+    const groupId = crypto.randomUUID();
+    await sql`insert into order_groups(id,group_number,customer_id) values(${groupId},'GRP-PLAN',1)`;
+    await sql`update orders set order_group_id=${groupId},order_group_position=1 where id=1`;
+    await sql`insert into orders(order_number,warehouse_id,customer_id,status,stock_reserved,payment_arrangement,shipping_address,shipping_latitude,shipping_longitude,order_group_id,order_group_position)
+      values('ORDER-3',1,1,'SCHEDULING',true,'NET_30','Saved address',14.55,121.05,${groupId},2)`;
+    const [order] = await sql`select id from orders where order_number='ORDER-3'`;
+    await sql`insert into order_items(order_id,inventory_id,quantity,unit_price_snapshot,price_source) values(${order.id},1,1,12.34,'fixture')`;
+    await sql`update inventory set reserved=3 where id=1`;
+    const run = await delivery.createDelivery({ order_ids: [1, order.id], driver_id: 3, vehicle_id: 1,
+      scheduled_date: "2099-01-01", scheduled_time: "10:00", delivery_type: "INTERNAL", delivery_allowance: 0, fuel: 0, toll: 0 }, 1);
+    const stops = await sql`select id from deliveries_stops where delivery_id=${run.id} order by leg_index,id`;
+    const cookie = await login("driver1@example.test", true);
+    const command = (stopId: number, action: string, auth = cookie) => app.handle(new Request(`http://localhost/driver/stops/${stopId}/plan`, {
+      method: "POST", headers: { cookie: auth, "content-type": "application/json" }, body: JSON.stringify({ action }),
+    }));
+    expect((await command(stops[0].id, "skip")).status).toBe(409);
+    await delivery.dispatchDelivery(run.id, 1);
+    const other = await login("driver2@example.test", true);
+    expect((await command(stops[0].id, "skip", other)).status).toBe(404);
+    expect((await command(stops[0].id, "invalid")).status).toBe(400);
+    const stock = await sql`select quantity,reserved from inventory where id=1`;
+    let resourceChanged!: (event: any) => void;
+    let driverChanged!: (event: any) => void;
+    const resourceEvent = new Promise<any>(resolve => { resourceChanged = resolve; });
+    const driverEvent = new Promise<any>(resolve => { driverChanged = resolve; });
+    const resourceListener = await sql.listen("hyops_resource_changed", (raw: string) => resourceChanged(JSON.parse(raw)));
+    const driverListener = await sql.listen("hyops_driver_changed", (raw: string) => driverChanged(JSON.parse(raw)));
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      expect((await command(stops[0].id, "skip")).status).toBe(200);
+      const events = await Promise.race([
+        Promise.all([resourceEvent, driverEvent]),
+        new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error("Missing committed plan notifications")), 3000); }),
+      ]);
+      expect(events[0]).toMatchObject({ type: "RESOURCE_CHANGED", payload: { resource: "deliveries" } });
+      expect(events[1]).toMatchObject({ driverId: 3, deliveryId: run.id, kind: "updated" });
+    } finally {
+      clearTimeout(timeout);
+      await resourceListener.unlisten();
+      await driverListener.unlisten();
+    }
+    expect((await command(stops[1].id, "next")).status).toBe(200);
+    const plan = { driverId: 3, nextStopId: stops[1].id, skippedStopIds: [stops[0].id] };
+    const trip = await service.trip(3, run.id);
+    expect(trip.stopPlan).toEqual(plan);
+    expect(trip.stops.every(s => s.status === "pending")).toBe(true);
+    expect(trip.status).toBe("in_transit");
+    expect(await sql`select quantity,reserved from inventory where id=1`).toEqual(stock);
+    expect(await sql`select * from driver_stop_outcomes`).toHaveLength(0);
+    expect(await sql`select * from payments`).toHaveLength(0);
+    const admin = await login("admin@example.test");
+    const fleet = await app.handle(new Request("http://localhost/fleet", { headers: { cookie: admin } }));
+    expect(fleet.status).toBe(200);
+    const vehicle = (await fleet.json()).vehicles.find((v: any) => v.id === "1");
+    expect(vehicle.stops[0]).toMatchObject({ status: "pending", skippedForNow: true, deliverNext: false });
+    expect(vehicle.stops[1]).toMatchObject({ skippedForNow: false, deliverNext: true });
+    // Concurrent skips merge under the delivery lock rather than overwriting a full client plan.
+    await Promise.all(stops.map((s: any) => service.planStop(3, s.id, "skip")));
+    expect((await service.trip(3, run.id)).stopPlan.skippedStopIds.sort()).toEqual(stops.map((s: any) => s.id).sort());
+    expect((await service.trip(3, run.id)).status).toBe("in_transit");
+    expect((await command(stops[0].id, "next")).status).toBe(200);
+    expect((await service.trip(3, run.id)).stopPlan.nextStopId).toBe(stops[0].id);
+    const version = (await service.trip(3, run.id)).version;
+    await service.outcome(3, stops[0].id, { version, operationKey: crypto.randomUUID(), reason: "Closed" }, "failed");
+    expect((await service.trip(3, run.id)).stopPlan.nextStopId).toBeNull();
+    expect((await command(stops[0].id, "skip")).status).toBe(409);
+    await sql`update deliveries set driver_id=4 where id=${run.id}`;
+    expect((await service.trip(4, run.id)).stopPlan).toEqual({ driverId: 4, nextStopId: null, skippedStopIds: [] });
+  });
   test("mobile login rejects non-driver accounts, invalid passwords and missing mobile flag", async () => {
     const send = (body: unknown) => app.handle(new Request("http://localhost/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
     const wrong = await send({ email: "staff@example.test", password: "incorrect-password", is_mobile: true });
@@ -154,5 +225,63 @@ describe.skipIf(!testUrl)("real database driver integration", () => {
     ]);
     expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
     expect(await sql`select * from driver_stop_outcomes`).toHaveLength(1);
+  });
+  test("durable actor-scoped receipts resolve ambiguous commits and reject key reuse", async () => {
+    const { syncCapabilities } = require("../src/modules/driver/sync-receipts");
+    const { SettingService, MOBILE_OFFLINE_WRITES_SETTING: name } = require("../src/modules/settings/service");
+    expect(await syncCapabilities()).toMatchObject({ protocol: 1, acceptNewCommands: false });
+    await SettingService.updateSetting([{ name, value: "true", version: 1 }]);
+    expect(await syncCapabilities()).toMatchObject({ protocol: 1, acceptNewCommands: true });
+    const run = await schedule(); await delivery.dispatchDelivery(run.id, 1);
+    const key = crypto.randomUUID();
+    const command = { version: 2, operationKey: key, reason: "Closed" };
+    const results = await Promise.all([
+      service.outcome(3, run.stopId, command, "failed"),
+      service.outcome(3, run.stopId, command, "failed"),
+    ]);
+    expect(results[0]).toEqual(results[1]);
+    expect(results[0]).toMatchObject({ previousTripVersion: 2, tripVersion: 3 });
+    expect(await sql`select * from driver_sync_receipts where operation_key=${key}`).toHaveLength(1);
+    expect(await sql`select * from driver_stop_outcomes`).toHaveLength(1);
+    await expect(service.outcome(3, run.stopId, { ...command, reason: "Different" }, "failed")).rejects.toThrow("different details");
+    await sql`update deliveries set driver_id=4 where id=${run.id}`;
+    const { operationReceipt } = require("../src/modules/driver/sync-receipts");
+    await SettingService.updateSetting([{ name, value: "false", version: 2 }]);
+    expect(await syncCapabilities()).toMatchObject({ protocol: 1, acceptNewCommands: false });
+    expect(await operationReceipt(3, key)).toMatchObject({ accepted: true, result: results[0] });
+    expect(await operationReceipt(4, key)).toEqual({ accepted: false, result: null });
+    // Current ownership is still enforced on POST; receipt lookup is minimal.
+    await expect(service.outcome(3, run.stopId, command, "failed")).rejects.toThrow("Assignment not found");
+    expect(mayAccess("driver", "GET", `/driver/sync/operations/${key}`)).toBe(true);
+    expect(mayAccess("customer", "GET", `/driver/sync/operations/${key}`)).toBe(false);
+  });
+  test("offline recording is saved through admin Settings without reseeding and ignores the old environment flag", async () => {
+    const { SettingService, MOBILE_OFFLINE_WRITES_SETTING: name } = require("../src/modules/settings/service");
+    const { syncCapabilities } = require("../src/modules/driver/sync-receipts");
+    const previous = process.env.HYOPS_ENABLE_DRIVER_OFFLINE_WRITES;
+    process.env.HYOPS_ENABLE_DRIVER_OFFLINE_WRITES = "true";
+    try {
+      expect((await SettingService.getAllSettings())[name]).toMatchObject({ value: "false", version: 1 });
+      expect(await syncCapabilities()).toMatchObject({ acceptNewCommands: false });
+      const admin = await login("admin@example.test"), staff = await login("staff@example.test");
+      const driver = await login("driver1@example.test", true);
+      const update = (cookie: string, value: string, version = 1) => app.handle(new Request("http://localhost/settings", {
+        method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify([{ name, value, version }]),
+      }));
+      expect((await update(staff, "true")).status).toBe(403);
+      expect((await update(driver, "true")).status).toBe(403);
+      expect((await update(admin, "TRUE")).status).toBe(400);
+      expect(await sql`select * from settings where name=${name}`).toHaveLength(0);
+      expect((await update(admin, "true")).status).toBe(200);
+      expect((await SettingService.getAllSettings())[name]).toMatchObject({ value: "true", version: 2 });
+      const capabilities = await app.handle(new Request("http://localhost/driver/sync/capabilities", { headers: { cookie: driver } }));
+      expect(await capabilities.json()).toMatchObject({ protocol: 1, acceptNewCommands: true });
+      await expect(SettingService.updateSetting([{ name, value: "false", version: 1 }])).rejects.toThrow("modified");
+      expect((await update(admin, "false", 2)).status).toBe(200);
+      expect(await syncCapabilities()).toMatchObject({ protocol: 1, acceptNewCommands: false });
+    } finally {
+      if (previous === undefined) delete process.env.HYOPS_ENABLE_DRIVER_OFFLINE_WRITES;
+      else process.env.HYOPS_ENABLE_DRIVER_OFFLINE_WRITES = previous;
+    }
   });
 });

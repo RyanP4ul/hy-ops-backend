@@ -19,7 +19,7 @@ const automationData: AutomationInsert[] = [
     schedule: "Every hour",
     interval_ms: 60 * 60 * 1000,
     status: "ENABLED",
-    notes: "Checks PAY_ON_DELIVERY and NET_30 payment arrangements.",
+    notes: "Checks PARTIALLY_PAID and NET_30 orders with outstanding balances after 30 days.",
   },
   {
     name: "Delivery Follow-up Checker",
@@ -28,23 +28,6 @@ const automationData: AutomationInsert[] = [
     interval_ms: 10 * 60 * 1000,
     status: "ENABLED",
     notes: "Checks scheduled and in-transit deliveries needing follow-up.",
-  },
-  {
-    name: "Notification Cleanup",
-    description: "Represents scheduled cleanup of expired notifications.",
-    schedule: "Daily at 02:00",
-    daily_time: "02:00",
-    status: "DISABLED",
-    notes: "Sample automation; no task callback is registered yet.",
-  },
-  {
-    name: "Daily Summary Preview",
-    description: "Represents a daily operational summary task.",
-    schedule: "Daily at 06:00",
-    daily_time: "06:00",
-    status: "FAILED",
-    notes: "Illustrative failed state for the automation UI.",
-    last_error: "Illustrative failed state.",
   },
 ];
 

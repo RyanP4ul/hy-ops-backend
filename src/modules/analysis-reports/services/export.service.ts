@@ -254,7 +254,7 @@ export async function buildExport(
   threshold = DEFAULT_LOW_STOCK,
   now = Date.now(),
 ) {
-  const { table } = await build(type, f, now, threshold);
+  const { table, summary } = await build(type, f, now, threshold);
   const metadata = reportMetadata(type, f, now, threshold);
   const filename = `${type.toLowerCase()}-report-${manilaDay(now)}.${format}`;
 
@@ -275,6 +275,14 @@ export async function buildExport(
   }
 
   const wb = new ExcelJS.Workbook();
+  const analysis = wb.addWorksheet("Analysis summary");
+  analysis.columns = [
+    { header: "Metric", key: "label", width: 28 },
+    { header: "Value", key: "value", width: 22 },
+    { header: "Format", key: "format", width: 16 },
+  ];
+  analysis.addRows(summary.map(row => ({ ...row, value: row.value ?? "Unverified" })));
+  analysis.getRow(1).font = { bold: true };
   const ws = wb.addWorksheet(type);
   ws.columns = table.columns.map((c) => ({
     header: c.label,

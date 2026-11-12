@@ -24,6 +24,7 @@ export * from "./payment-refund";
 export * from "./vehicle-position";
 export * from "./payment-receipt";
 export * from "./driver-outcomes";
+export * from "./driver-sync";
 
 export * from "./driver-engagement";
 export * from "./customer-returns";

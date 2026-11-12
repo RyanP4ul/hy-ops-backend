@@ -182,7 +182,35 @@ access-token guard.
 Paginated endpoints return the total row count in the `X-Total-Count` response
 header. Validation failures return status `400` with an `errors` object.
 
-## Websocket
+## Scheduled report archives
+
+The backend automatically registers **Weekly Analysis & Reports** (Monday 06:00)
+and **Monthly Analysis & Reports** (1st of the month 06:00), in `Asia/Manila`.
+Both start enabled and appear in Automations with enable/disable and Run now controls.
+Each run exports five Excel workbooks: sales, inventory, payment, delivery, and
+customer. Workbooks contain analysis summaries, detail rows, and report metadata.
+Weekly reports cover the previous completed Monday–Sunday week; monthly reports
+cover the previous calendar month. Inventory is the current stock snapshot at
+generation time, and payment balances follow the existing report definitions.
+
+Files use the existing R2 connection (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`):
+
+```text
+weekly/2026-11-02_to_2026-11-08/sales-report.xlsx
+monthly/2026-10-01_to_2026-10-31/sales-report.xlsx
+```
+
+The same folders also contain `inventory-report.xlsx`, `payment-report.xlsx`,
+`delivery-report.xlsx`, and `customer-report.xlsx`. Keys stay stable on retries
+and manual reruns. The backend must be running for scheduling; persisted due
+times survive restarts. After downtime, one run captures the latest completed
+period rather than backfilling every missed period. Failed runs retry after five
+minutes and retain their error in Automations. Multiple replicas coordinate with
+PostgreSQL advisory locks. `automation: false` or `externalIntegrations: false`
+disables the report worker. No schema migration or reseeding is needed.
+
+## Websocket connection
 
 Connect to `ws://localhost:5173/ws` after authenticating. The websocket is used
 for live session, notification, order, product, user, warehouse, and page-change

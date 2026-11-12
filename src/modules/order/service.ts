@@ -1,3 +1,6 @@
+import { assertOperationalOrder } from "../lifecycle/order-eligibility";
+import { activeInventory } from "../lifecycle/availability";
+import { activeUser, activeWarehouse } from "../lifecycle/availability";
 import { createHash } from "node:crypto";
 import { WorkflowError } from "../../utils/workflow-error";
 import { stockTransaction, type StockTransaction } from "../inventory/transaction";
@@ -51,6 +54,7 @@ const orderGroupFields = {
 const internalSchedulingEligible = sql`coalesce(${orders.delivery_method}, '') not in ('LALAMOVE', 'WALK_IN')
   and not exists (select 1 from delivery_orders b where b.order_id = ${orders.id} and b.active)
   and not exists (select 1 from orders m where m.order_group_id = ${orders.order_group_id}
+    and m.status <> 'CANCELLED'
     and (m.delivery_method in ('LALAMOVE', 'WALK_IN') or exists (select 1 from delivery_orders b where b.order_id = m.id and b.active)))`;
 
 const resolvedCustomerNameSql = sql<string>`case when ${orders.sales_channel} = 'WALK_IN' and coalesce(nullif(trim(${orders.shipping_recipient}), ''), '') <> '' then ${orders.shipping_recipient} else ${users.name} end`;
@@ -209,10 +213,10 @@ export abstract class OrderService {
         eq(inventory.product_variant_id, product_variants.id),
       )
       .where(
-        inArray(
+        and(activeInventory(), inArray(
           inventory.id,
           [...new Set(items.map((item) => item.inventory_id))],
-        ),
+        )),
       )
       .orderBy(asc(inventory.id))
       .for("update");
@@ -278,10 +282,10 @@ export abstract class OrderService {
   static async saveShippingAddress(customerId: number, data: import("./model").SavedShippingAddress) {
     const point = coordinates(data.latitude, data.longitude);
     if (!point) throw new WorkflowError("Confirm valid coordinates for this shipping address.");
-    return db.transaction(async (tx) => {
+    return stockTransaction(async (tx) => {
       const [customer] = await tx.select({ id: customers.id }).from(customers)
         .innerJoin(users, eq(users.id, customers.user_id))
-        .where(and(eq(customers.id, customerId), eq(users.is_archived, false)))
+        .where(and(eq(customers.id, customerId), activeUser()))
         .for("update", { of: customers });
       if (!customer) throw new WorkflowError("Choose an active customer.");
       const [address] = await tx.insert(customer_addresses).values({
@@ -369,6 +373,7 @@ export abstract class OrderService {
     delivery_type: string = "",
     sort_by: string = "id:desc",
     status = "",
+    warehouseId?: number,
   ) {
     page = Number.isSafeInteger(page) && page >= 0 ? page : 0;
     limit = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 100) : 10;
@@ -388,6 +393,7 @@ export abstract class OrderService {
         ilike(orders.shipping_address, `%${search}%`),
       ),
       validStatus ? eq(orders.status, validStatus) : undefined,
+      warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId),
       delivery_type === "WALK_IN" ? eq(orders.sales_channel, "WALK_IN") : ["INTERNAL", "LALAMOVE", "PICKUP"].includes(delivery_type) ? sql`${latestDeliveryType} = ${delivery_type}` : undefined,
     );
 
@@ -546,7 +552,7 @@ export abstract class OrderService {
     return order === "asc" ? asc(column) : desc(column);
   }
 
-  static async getOrderDetailsByIds(orderIds: number[]) {
+  static async getOrderDetailsByIds(orderIds: number[], warehouseId?: number) {
     const rows = await db
       .select({
         id: orders.id,
@@ -574,7 +580,7 @@ export abstract class OrderService {
       })
       .from(orders)
       .leftJoin(customers, eq(orders.customer_id, customers.id))
-      .where(inArray(orders.id, orderIds));
+      .where(and(inArray(orders.id, orderIds), warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId)));
 
     return rows.map((row) => ({
       ...row,
@@ -628,7 +634,7 @@ export abstract class OrderService {
       const [warehouse] = await tx
         .select({ id: warehouses.id, name: warehouses.name })
         .from(warehouses)
-        .where(and(eq(warehouses.id, data.warehouse_id), eq(warehouses.is_archived, false)))
+        .where(and(eq(warehouses.id, data.warehouse_id), activeWarehouse()))
         .for("share");
       if (!warehouse) throw new WorkflowError("Choose an active warehouse.");
 
@@ -642,7 +648,7 @@ export abstract class OrderService {
           })
           .from(customers)
           .innerJoin(users, eq(users.id, customers.user_id))
-          .where(and(eq(customers.id, data.customer_id), eq(users.is_archived, false)))
+          .where(and(eq(customers.id, data.customer_id), activeUser()))
           .for("update", { of: customers });
         if (!found) throw new WorkflowError("Customer not found.");
         customerRow = found;
@@ -841,7 +847,7 @@ export abstract class OrderService {
       throw new WorkflowError("Order must have at least one item");
     }
 
-    const [warehouse] = await tx.select({ id: warehouses.id }).from(warehouses).where(and(eq(warehouses.id, data.warehouse_id), eq(warehouses.is_archived, false))).for("share");
+    const [warehouse] = await tx.select({ id: warehouses.id }).from(warehouses).where(and(eq(warehouses.id, data.warehouse_id), activeWarehouse())).for("share");
     if (!warehouse) throw new WorkflowError("Choose an active warehouse.");
     const [customer] = await tx
       .select({ id: customers.id })
@@ -868,7 +874,7 @@ export abstract class OrderService {
         })
         .from(customers)
         .innerJoin(users, eq(customers.user_id, users.id))
-        .where(eq(customers.id, data.customer_id));
+        .where(and(eq(customers.id, data.customer_id), activeUser()));
       if (!customerQuery) throw new WorkflowError("Customer not found.");
 
       const savedAddresses = await tx
@@ -991,7 +997,7 @@ export abstract class OrderService {
   }
 
   static async processOrder(orderId: number, version: number) {
-    return await db.transaction(async (tx) => {
+    return await stockTransaction(async (tx) => {
       const [order] = await tx
         .select()
         .from(orders)
@@ -1000,6 +1006,8 @@ export abstract class OrderService {
       if (!order) {
         throw new WorkflowError("Order not found");
       }
+
+      await assertOperationalOrder(tx, orderId);
 
       if (order.delivery_method === "WALK_IN") {
         throw new WorkflowError("Walk-in orders are completed at the counter and do not require processing.");
@@ -1022,7 +1030,7 @@ export abstract class OrderService {
   }
 
   static async deliveryOrder(orderId: number, version: number) {
-    return await db.transaction(async (tx) => {
+    return await stockTransaction(async (tx) => {
       const [order] = await tx
         .select()
         .from(orders)
@@ -1031,6 +1039,8 @@ export abstract class OrderService {
       if (!order) {
         throw new WorkflowError("Order not found");
       }
+
+      await assertOperationalOrder(tx, orderId);
 
       if (order.delivery_method === "WALK_IN") {
         throw new WorkflowError("Walk-in orders are completed at the counter and cannot be scheduled for delivery.");
@@ -1124,7 +1134,7 @@ export abstract class OrderService {
         sales_channel: orders.sales_channel,
       order_number: orders.order_number, shipping_address: orders.shipping_address,
       shipping_latitude: orders.shipping_latitude, shipping_longitude: orders.shipping_longitude,
-    }).from(orders).where(eq(orders.order_group_id, groupId)).orderBy(asc(orders.order_group_position));
+    }).from(orders).where(and(eq(orders.order_group_id, groupId), sql`${orders.status} <> 'CANCELLED'`)).orderBy(asc(orders.order_group_position));
     if (!members.some(row => row.warehouse_id === warehouseId)) throw new WorkflowError("Order group not found in this warehouse.", 404);
     if (members.some(row => row.warehouse_id !== warehouseId)) throw new WorkflowError("All orders in this group must belong to the selected warehouse.");
     if (members.some(row => row.status !== "SCHEDULING")) throw new WorkflowError("All orders in this group must have Scheduling status before the group can be scheduled.");
@@ -1155,19 +1165,20 @@ export abstract class OrderService {
     const groupIds = entries.flatMap(entry => entry.group_id ? [entry.group_id] : []);
     const singleIds = entries.filter(entry => !entry.group_id).map(entry => entry.id);
     const members = await db.select({ id: orders.id, warehouse_id: orders.warehouse_id, order_number: orders.order_number,
+      active_group_size: sql<number>`(select count(*)::int from orders m where m.order_group_id = ${orders.order_group_id} and m.status <> 'CANCELLED')`.mapWith(Number),
       ...orderGroupFields,
         sales_channel: orders.sales_channel, customer_name: resolvedCustomerNameSql, customer_company: customers.company_name,
       payment_arrangement: orders.payment_arrangement, status: orders.status, shipping_address: orders.shipping_address,
       shipping_latitude: orders.shipping_latitude, shipping_longitude: orders.shipping_longitude, version: orders.version,
     }).from(orders).leftJoin(customers, eq(customers.id, orders.customer_id)).leftJoin(users, eq(users.id, customers.user_id))
       .where(and(or(groupIds.length ? inArray(orders.order_group_id, groupIds) : undefined,
-        singleIds.length ? inArray(orders.id, singleIds) : undefined),
+        singleIds.length ? inArray(orders.id, singleIds) : undefined), sql`${orders.status} <> 'CANCELLED'`,
         warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId)))
       .orderBy(asc(orders.order_group_position), asc(orders.id));
     const rows = entries.map(entry => {
       const children = members.filter(member => entry.group_id ? member.order_group_id === entry.group_id : member.id === entry.id);
       const first = children[0]!;
-      const total = entry.group_id ? first.order_group_size : 1;
+      const total = entry.group_id ? first.active_group_size : 1;
       const ready = children.filter(member => member.status === "SCHEDULING").length;
       const oneWarehouse = children.length === total && new Set(children.map(member => member.warehouse_id)).size === 1;
       const located = children.every(member => coordinates(member.shipping_latitude, member.shipping_longitude));

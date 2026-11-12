@@ -7,6 +7,7 @@ import { deliveries, deliveries_stops, driver_stop_proofs } from "../../db/schem
 import { r2, r2Bucket } from "../../lib/storage/r2";
 import { WorkflowError } from "../../utils/workflow-error";
 import { staffWarehouse, assertDeliveryScope } from "../deliveries/scope";
+import { commandHash, replayReceipt, saveReceipt } from "./sync-receipts";
 
 export interface ProofStorage {
   put(key: string, data: Uint8Array, contentType: string): Promise<void>;
@@ -49,9 +50,11 @@ export class ProofService {
 
   async upload(actorId: number, stopId: number, file: File, kind: "photo" | "signature", operationKey: string) {
     if (!file.size || file.size > 5 * 1024 * 1024) throw new WorkflowError("Proof must be between 1 byte and 5 MB.", 400);
+    const input = Buffer.from(await file.arrayBuffer());
+    const requestHash = commandHash("proof", stopId, { kind, sha256: createHash("sha256").update(input).digest("hex") });
     let data: Buffer;
     try {
-      const image = sharp(Buffer.from(await file.arrayBuffer()), { limitInputPixels: 20000000, animated: false });
+      const image = sharp(input, { limitInputPixels: 20000000, animated: false });
       const info = await image.metadata();
       if (!["jpeg", "png", "webp"].includes(info.format ?? "") || (info.pages ?? 1) > 1) throw new Error("Invalid image");
       const normalized = image.rotate().resize({ width: 2048, height: 2048, fit: "inside", withoutEnlargement: true });
@@ -63,10 +66,12 @@ export class ProofService {
     let written: string | undefined;
     try {
       return await db.transaction(async tx => {
+        const receipt = await replayReceipt(tx, actorId, operationKey, requestHash);
         const [identity] = await tx.select({ deliveryId: deliveries_stops.delivery_id }).from(deliveries_stops).where(eq(deliveries_stops.id, stopId));
         if (!identity) throw new WorkflowError("Assignment not found.", 404);
         const [run] = await tx.select().from(deliveries).where(eq(deliveries.id, identity.deliveryId)).for("update");
         if (!run || run.driver_id !== actorId) throw new WorkflowError("Assignment not found.", 404);
+        if (receipt) return receipt;
         const [existing] = await tx.select().from(driver_stop_proofs).where(eq(driver_stop_proofs.operation_key, operationKey));
         if (existing) {
           if (existing.actor_id !== actorId || existing.stop_id !== stopId || existing.sha256 !== hash || existing.kind !== kind) throw new WorkflowError("Proof operation key was already used for another upload.");
@@ -79,7 +84,7 @@ export class ProofService {
         written = key;
         await this.store.put(key, data, contentType);
         const [record] = await tx.insert(driver_stop_proofs).values({ id, stop_id: stopId, actor_id: actorId, operation_key: operationKey, kind, storage_key: key, content_type: contentType, sha256: hash, byte_size: data.length }).returning(metadata);
-        return record;
+        return saveReceipt(tx, actorId, operationKey, requestHash, { ...record, deliveryId: run.id, entityId: stopId, tripVersion: run.version });
       });
     } catch (error) {
       if (written) { try { await this.store.delete(written); } catch { console.error("Driver proof cleanup failed; private orphan requires storage cleanup."); } }

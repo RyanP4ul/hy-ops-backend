@@ -1,9 +1,11 @@
+import { stockTransaction } from "../inventory/transaction";
+import { lifecycleTables, type LifecycleResource } from "../lifecycle/service";
 import { db } from "@/db/index";
 import { archives, archivesInsert, archivesSelect } from "@/db/schema/archive";
 import { and, eq, count, desc, sql } from "drizzle-orm";
 import * as schema from "../../db/schema";
 import { getTable, TableName, tables } from "@/db/table";
-import { users, warehouses } from "../../db/schema";
+import { users, warehouses, vehicles, products, inventory } from "../../db/schema";
 import { logger } from "../../utils/logger";
 import { lockUserMutation, UserMutationError, type MutationActor } from "../user/mutation-policy";
 
@@ -23,6 +25,12 @@ export abstract class ArchiveService {
           },
           where: eq(users.id, entity_id),
         });
+      case tables.products:
+        return db.query.products.findFirst({ where: eq(products.id, entity_id), with: { variants: true } });
+      case tables.inventory:
+        return db.query.inventory.findFirst({ where: eq(inventory.id, entity_id) });
+      case tables.vehicles:
+        return db.query.vehicles.findFirst({ where: eq(vehicles.id, entity_id) });
       case tables.warehouses:
         return await db.query.warehouses.findFirst({
           columns: {
@@ -37,7 +45,8 @@ export abstract class ArchiveService {
   }
 
   static async getArchives(page: number = 1, limit: number = 10) {
-    const offset = Math.max(page * limit, 0);
+    limit = Math.min(100, Math.max(1, Number.isFinite(limit) ? limit : 10));
+    const offset = Math.max((Number.isFinite(page) ? page : 0) * limit, 0);
 
     const [totalResult, rows] = await Promise.all([
       db.select({ count: count() }).from(archives),
@@ -64,7 +73,6 @@ export abstract class ArchiveService {
 
       const user = await db.query.users.findFirst({ columns: { id: true, name: true }, where: eq(users.id, row.archived_by) });
 
-      if (!user) continue;
 
       new_rows.push({
         ...row,
@@ -106,20 +114,20 @@ export abstract class ArchiveService {
   }
 
   static async restoreArchive(archive_id: number, actor: MutationActor) {
-    return db.transaction(async (tx) => {
+    return stockTransaction(async (tx) => {
       await lockUserMutation(tx, actor);
       const [archive] = await tx.select().from(archives).where(eq(archives.id, archive_id)).for("update");
       if (!archive) throw new UserMutationError("Archive not found or already restored.");
-      const table = archive.entity_type === "users" ? users : archive.entity_type === "warehouses" ? warehouses : null;
+      const table = Object.hasOwn(lifecycleTables, archive.entity_type) ? lifecycleTables[archive.entity_type as LifecycleResource] : null;
       if (!table) throw new UserMutationError("Restoration is not supported for this record type.");
       const [restored] = await tx.update(table).set({
-        is_archived: false, archived_at: null, version: sql`${table.version} + 1`,
-        updated_at: Math.floor(Date.now() / 1000),
+        is_archived: false, is_active: false, archived_at: null, version: sql`${table.version} + 1`,
+        updated_at: archive.entity_type === "products" ? new Date() : Math.floor(Date.now() / 1000),
       }).where(and(eq(table.id, Number(archive.entity_id)), eq(table.is_archived, true))).returning({ id: table.id });
       if (!restored) throw new UserMutationError("Archived record no longer exists or is already active.");
       await tx.delete(archives).where(eq(archives.id, archive_id));
-      return { message: `Successfully restored ${archive.entity_type} record ${archive.entity_id}` };
-    });
+      return { message: `Successfully restored ${archive.entity_type} record ${archive.entity_id}. Any scheduled deletion was cancelled.` };
+    }, true);
   }
 
   static async doesArchiveExist(archived_id: number) {

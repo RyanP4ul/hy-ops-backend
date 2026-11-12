@@ -206,7 +206,7 @@ export async function userSeeds() {
         const driver: DriverInsert = {
           user_id: insertedUser[0].id,
           warehouse_id: 1,
-          phone_number: "+1-555-0200",
+          phone_number: "639482734769",
         };
 
         await db.insert(drivers).values(driver);

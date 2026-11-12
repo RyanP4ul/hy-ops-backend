@@ -11,14 +11,16 @@
     "db:generate": "bun --env-file=.env.development drizzle-kit generate",
     "db:migrate": "bun --env-file=.env.development drizzle-kit migrate",
     "db:push": "bun --env-file=.env.development drizzle-kit push",
+	"db:seed": "bun src/db/seeds",
 	
     "production:db:generate": "bun --env-file=.env.production drizzle-kit generate",
     "production:db:migrate": "bun --env-file=.env.production drizzle-kit migrate",
     "production:db:push": "bun --env-file=.env.production drizzle-kit push",
+	"production:db:seed": "bun --env-file=.env.production src/db/seeds",
 	
     "db:studio": "drizzle-kit studio",
     "db:drop": "drizzle-kit drop",
-    "db:seed": "bun run src/db/seeds",
+    
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "lint:rules": "oxlint --rules",

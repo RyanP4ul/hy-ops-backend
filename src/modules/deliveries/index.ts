@@ -34,6 +34,15 @@ export const deliveriesRoutes = new Elysia({
 })
   .decorate("user", {} as AuthUser)
   .use(deliveryModel)
+  .get("/:id/expenses", async ({ params, user }) =>
+    DeliveryService.getExpenses(params.id, await staffWarehouse(user)), {
+    params: t.Object({ id: t.Numeric({ minimum: 1, multipleOf: 1 }) }),
+    detail: {
+      summary: "View delivery expenses",
+      description: "Retrieve saved delivery expenses within the current warehouse scope.",
+      tags: ["Deliveries"],
+    },
+  })
   .get("/calendar", async ({ user }) => getDeliveryCalendar(await staffWarehouse(user)), {
     detail: {
       summary: "Get delivery calendar",

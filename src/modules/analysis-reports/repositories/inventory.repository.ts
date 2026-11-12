@@ -1,3 +1,4 @@
+import { activeInventory } from "../../lifecycle/availability";
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import {
   inventory,
@@ -37,6 +38,7 @@ export async function findInventory(f: Filters): Promise<InventoryView[]> {
     )
     .where(
       and(
+        activeInventory(),
         f.warehouses.length
           ? inArray(inventory.warehouse_id, f.warehouses.map(Number))
           : undefined,

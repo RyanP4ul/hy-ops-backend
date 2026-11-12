@@ -1,3 +1,5 @@
+import { assertOperationalOrder } from "../lifecycle/order-eligibility";
+import { activeUser, activeWarehouse, activeVehicle } from "../lifecycle/availability";
 import { CustomerReturnService } from "./customer-returns";
 import { isWarehouseArrival, parseWarehouseArrivalRadius, WAREHOUSE_ARRIVAL_RADIUS_M, WAREHOUSE_ARRIVAL_SETTING } from "./warehouse-arrival";
 import { settings } from "../../db/schema/settings";
@@ -57,6 +59,27 @@ function schedulingConflict(error: unknown): never {
 }
 
 export abstract class DeliveryService {
+  static async getExpenses(id: number, warehouseId?: number) {
+    await assertDeliveryScope(db, id, warehouseId);
+    const [delivery] = await db
+      .select({ id: deliveries.id })
+      .from(deliveries)
+      .where(eq(deliveries.id, id));
+    if (!delivery) throw new WorkflowError("Delivery not found.", 404);
+
+    return db
+      .select({
+        id: deliveries_expenses.id,
+        delivery_allowance: deliveries_expenses.delivery_allowance,
+        fuel: deliveries_expenses.fuel,
+        toll: deliveries_expenses.toll,
+        status: deliveries_expenses.status,
+      })
+      .from(deliveries_expenses)
+      .where(eq(deliveries_expenses.delivery_id, id))
+      .orderBy(asc(deliveries_expenses.id));
+  }
+
   static async getDeliveryTableRowById(id: number) {
     const result = await this.getDelivery(0, 1, "", undefined, id);
     return result.rows.find((row) => row.delivery_id === id) ?? null;
@@ -184,8 +207,7 @@ export abstract class DeliveryService {
 
   static async createDelivery(data: DeliveryCreateType, warehouseId?: number) {
     if (data.delivery_type === "LALAMOVE") throw new WorkflowError("Use the Lalamove quotation and confirmation flow. External couriers cannot be assigned to internal drivers.");
-    return await db
-      .transaction(async (tx) => {
+    return await stockTransaction(async (tx) => {
         if (
           !data.order_ids.length ||
           new Set(data.order_ids).size !== data.order_ids.length
@@ -201,6 +223,7 @@ export abstract class DeliveryService {
         for (const id of data.order_ids) {
           const order = locked.find(member => member.id === id);
           if (!order || order.status !== "SCHEDULING") throw new WorkflowError("An order is no longer ready for scheduling. Refresh and try again.");
+          await assertOperationalOrder(tx, order.id);
           if (order.delivery_method === "WALK_IN") throw new WorkflowError("Counter takeaway orders cannot be assigned for delivery.");
           if (order.delivery_method === "LALAMOVE") throw new WorkflowError("This order uses Lalamove. Change its delivery method before internal assignment.");
           await assertNoExternalClaim(tx, id);
@@ -208,7 +231,7 @@ export abstract class DeliveryService {
         }
         const groups = new Set([...selectedOrders.values()].flatMap(order => order.order_group_id ? [order.order_group_id] : []));
         for (const groupId of groups) {
-          const members = locked.filter(order => order.order_group_id === groupId);
+          const members = locked.filter(order => order.order_group_id === groupId && order.status !== "CANCELLED");
           if (members.some(order => order.status !== "SCHEDULING")) throw new WorkflowError("All orders in this group must have Scheduling status before the group can be scheduled.");
           if (members.some(order => !requested.has(order.id))) throw new WorkflowError("Schedule every order in the group together. Partial group scheduling is not allowed.");
         }
@@ -219,7 +242,7 @@ export abstract class DeliveryService {
             and(
               eq(users.id, data.driver_id),
               eq(users.role, "driver"),
-              eq(users.is_archived, false),
+              activeUser(),
             ),
           );
         if (!driverAccount)
@@ -230,6 +253,7 @@ export abstract class DeliveryService {
           .where(
             and(
               eq(vehicles.id, data.vehicle_id),
+              activeVehicle(),
               eq(vehicles.status, "available"),
             ),
           )
@@ -364,8 +388,7 @@ export abstract class DeliveryService {
           400,
         );
     }
-    return await db
-      .transaction(async (tx) => {
+    return await stockTransaction(async (tx) => {
         const [delivery] = await tx
           .select({
             version: deliveries.version,
@@ -473,8 +496,7 @@ export abstract class DeliveryService {
     data: DeliveryAssignmentType,
     warehouseId?: number,
   ) {
-    return await db
-      .transaction(async (tx) => {
+    return await stockTransaction(async (tx) => {
         const [delivery] = await tx
           .select({
             version: deliveries.version,
@@ -503,7 +525,7 @@ export abstract class DeliveryService {
             and(
               eq(users.id, data.driver_id),
               eq(users.role, "driver"),
-              eq(users.is_archived, false),
+              activeUser(),
             ),
           );
         if (!driver) throw new WorkflowError("Selected driver is unavailable.");
@@ -514,6 +536,7 @@ export abstract class DeliveryService {
           .where(
             and(
               eq(vehicles.id, data.vehicle_id),
+              activeVehicle(),
               eq(vehicles.status, "available"),
             ),
           )
@@ -628,7 +651,7 @@ export abstract class DeliveryService {
       const [vehicle] = await tx
         .select()
         .from(vehicles)
-        .where(eq(vehicles.id, delivery.vehicle_id))
+        .where(and(eq(vehicles.id, delivery.vehicle_id), activeVehicle()))
         .for("update");
       if (!vehicle || vehicle.status !== "available") {
         throw new WorkflowError("Vehicle is not available");
@@ -644,7 +667,7 @@ export abstract class DeliveryService {
         .select({ id: users.id })
         .from(users)
         .where(
-          and(eq(users.id, delivery.driver_id), eq(users.is_archived, false)),
+          and(eq(users.id, delivery.driver_id), activeUser()),
         );
       if (!driverAccount)
         throw new WorkflowError("Driver account is inactive.");
@@ -822,7 +845,7 @@ export abstract class DeliveryService {
         if (delivery.status !== "returning") return;
         const [home] = await tx.select({ latitude: warehouses.latitude, longitude: warehouses.longitude })
           .from(vehicles).innerJoin(warehouses, eq(warehouses.id, vehicles.warehouse_id))
-          .where(and(eq(vehicles.id, delivery.vehicle_id), eq(warehouses.is_archived, false)));
+          .where(and(eq(vehicles.id, delivery.vehicle_id), activeWarehouse()));
         const [fix] = await tx.select().from(vehicle_positions).where(eq(vehicle_positions.vehicle_id, delivery.vehicle_id));
         const [arrivalSetting] = await tx.select({ value: settings.value }).from(settings).where(eq(settings.name, WAREHOUSE_ARRIVAL_SETTING));
         const radiusM = arrivalSetting ? parseWarehouseArrivalRadius(arrivalSetting.value) : WAREHOUSE_ARRIVAL_RADIUS_M;
@@ -945,7 +968,7 @@ export abstract class DeliveryService {
           version: sql`${vehicles.version} + 1`,
           updated_at: nowEpochSeconds(),
         })
-        .where(eq(vehicles.id, delivery.vehicle_id));
+        .where(and(eq(vehicles.id, delivery.vehicle_id), activeVehicle()));
 
       await tx
         .update(drivers)

@@ -1,3 +1,4 @@
+import { activeWarehouse } from "../lifecycle/availability";
 import { and, count, desc, eq, ilike, inArray, sql } from "drizzle-orm";
 import { db } from "../../db";
 import { orders } from "../../db/schema/order";
@@ -131,7 +132,7 @@ export abstract class LalamoveService {
   static async pickupWarehouses(id: number, page: number, search: string, actor: Actor) {
     await this.order(id, actor);
     const scope = await staffWarehouse(actor);
-    const where = and(eq(warehouses.is_archived, false), scope === undefined ? undefined : eq(warehouses.id, scope), search.trim() ? ilike(warehouses.name, `%${search.trim()}%`) : undefined);
+    const where = and(activeWarehouse(), scope === undefined ? undefined : eq(warehouses.id, scope), search.trim() ? ilike(warehouses.name, `%${search.trim()}%`) : undefined);
     const [rows, totals] = await Promise.all([
       db.select({ id: warehouses.id, name: warehouses.name, street_address: warehouses.street_address, city: warehouses.city, state: warehouses.state, zip_code: warehouses.zip_code, phone_number: warehouses.phone_number, latitude: warehouses.latitude, longitude: warehouses.longitude }).from(warehouses).where(where).orderBy(desc(warehouses.id)).limit(10).offset(page * 10),
       db.select({ total: count() }).from(warehouses).where(where),
@@ -146,7 +147,7 @@ export abstract class LalamoveService {
       const [order] = await tx.select().from(orders).where(eq(orders.id, id)).for("update");
       if (!order || order.version !== version || !["PENDING", "PROCESSING", "SCHEDULING"].includes(order.status)) throw new WorkflowError("Order changed or is already scheduled. Refresh first.");
       await assertNoExternalClaim(tx, id); await assertNoInternalClaim(tx, id);
-      const [warehouse] = await tx.select().from(warehouses).where(and(eq(warehouses.id, warehouseId), eq(warehouses.is_archived, false))).for("share");
+      const [warehouse] = await tx.select().from(warehouses).where(and(eq(warehouses.id, warehouseId), activeWarehouse())).for("share");
       if (!warehouse) throw new WorkflowError("Select an existing, active warehouse.", 404);
       if (!coordinates(warehouse.latitude, warehouse.longitude) || ![warehouse.street_address, warehouse.city, warehouse.state, warehouse.zip_code].every(value => value?.trim())) throw new WorkflowError("Save a complete address and verified coordinates for this warehouse first.");
       internationalPhone(warehouse.phone_number);
@@ -157,7 +158,7 @@ export abstract class LalamoveService {
   }
   static async route(order: typeof orders.$inferSelect): Promise<Route> {
     const [warehouse] = await db.select().from(warehouses).where(eq(warehouses.id, order.lalamove_pickup_warehouse_id ?? order.warehouse_id));
-    const pickup = warehouse && !warehouse.is_archived && coordinates(warehouse.latitude, warehouse.longitude);
+    const pickup = warehouse && !warehouse.is_archived && warehouse.is_active && coordinates(warehouse.latitude, warehouse.longitude);
     const dropoff = coordinates(order.shipping_latitude, order.shipping_longitude);
     if (!warehouse || !pickup || !dropoff) throw new WorkflowError("Verify warehouse and order destination coordinates first.");
     if (!warehouse.name?.trim() || !order.shipping_recipient?.trim() || !order.shipping_address?.trim()) throw new WorkflowError("Saved warehouse name and order recipient/address are required.");

@@ -114,9 +114,18 @@ export const orderBatchSchema = t.Union([separateOrderBatchSchema, combinedOrder
 export type OrderBatchInput = Static<typeof orderBatchSchema>;
 
 export const orderModel = new Elysia().model({
-  "order.create": orderCreateSchema,
-  "order.walk_in": walkInOrderSchema,
-  "order.batch": orderBatchSchema,
+  "order.create": t.Object({ ...orderCreateSchema.properties, warehouse_id: t.Optional(orderSchema.properties.warehouse_id) }),
+  "order.walk_in": t.Object({ ...walkInOrderSchema.properties, warehouse_id: t.Optional(orderSchema.properties.warehouse_id) }),
+  "order.batch": t.Union([
+    t.Object({ ...separateOrderBatchSchema.properties, orders: t.Array(t.Object({
+      ...separateOrderBatchSchema.properties.orders.items.properties,
+      warehouse_id: t.Optional(orderSchema.properties.warehouse_id),
+    }), { minItems: 1, maxItems: 25 }) }),
+    t.Object({ ...combinedOrderBatchSchema.properties, orders: t.Array(t.Object({
+      ...combinedOrderBatchSchema.properties.orders.items.properties,
+      warehouse_id: t.Optional(orderSchema.properties.warehouse_id),
+    }), { minItems: 1, maxItems: 25 }) }),
+  ]),
   "order.update": t.Object({
     ...orderUpdateSchema.properties,
   }),

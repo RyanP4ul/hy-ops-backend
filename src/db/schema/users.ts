@@ -37,6 +37,7 @@ export const users = pgTable("users", {
   refresh_token: varchar(),
   token_version: integer().default(0).notNull(),
   last_login: integer(),
+  is_active: boolean().notNull().default(true),
   version: integer().default(1).notNull(),
   is_archived: boolean().default(false).notNull(),
   archived_at: integer(),

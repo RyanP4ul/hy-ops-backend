@@ -5,6 +5,7 @@ import Elysia, { t } from "elysia";
 import { AuthUser } from "../auth/schema";
 import { DriverService } from "./service";
 import { settingService } from "../settings/service";
+import { operationReceipt, syncCapabilities } from "./sync-receipts";
 
 const pagination = t.Object({ page: t.Optional(t.Numeric({ minimum: 0, maximum: 100000, multipleOf: 1 })), pageSize: t.Optional(t.Numeric({ minimum: 1, maximum: 50, multipleOf: 1 })), past: t.Optional(t.Union([t.Literal("true"), t.Literal("false")])) });
 const historyQuery = t.Object({ ...pagination.properties, from: t.Optional(t.String({ format: "date" })), to: t.Optional(t.String({ format: "date" })), status: t.Optional(t.Union([t.Literal("delivered"), t.Literal("failed"), t.Literal("cancelled")])) });
@@ -12,8 +13,11 @@ const params = t.Object({ id: t.Numeric({ minimum: 1, multipleOf: 1 }) });
 const command = { version: t.Integer({ minimum: 1 }), operationKey: t.String({ format: "uuid" }) };
 
 export function createDriverRoutes(proofs = proofService) { return new Elysia({ prefix: "/driver" }).decorate("user", {} as AuthUser)
+  .get("/sync/capabilities", syncCapabilities, { detail: { tags: ["Drivers"] } })
+  .get("/sync/operations/:key", ({ user, params }) => operationReceipt(Number(user.sub), params.key), {
+    params: t.Object({ key: t.String({ format: "uuid" }) }), detail: { tags: ["Drivers"] } })
   .post("/returns/:id/collected", ({ user, params, body }) => CustomerReturnService.collect(Number(user.sub), params.id, body), {
-      detail: { summary: 'Create returns by id collected', description: 'POST endpoint for returns by id collected in the drivers module.', tags: ['Drivers'] }, params, body: t.Object(command) })
+      detail: { summary: 'Create returns by id collected', description: 'POST endpoint for returns by id collected in the drivers module.', tags: ['Drivers'] }, params, body: t.Object({ ...command, tripVersion: t.Optional(t.Integer({ minimum: 1 })) }) })
   .get("/profile", ({ user }) => DriverService.profile(Number(user.sub)), { detail: { summary: 'Get profile', description: 'GET endpoint for profile in the drivers module.', tags: ['Drivers'] } })
   .get("/settings", async () => {
     const [setting] = await settingService.getSettingByNames(["mobile_automatic_refresh_interval_ms"]);
@@ -35,6 +39,9 @@ export function createDriverRoutes(proofs = proofService) { return new Elysia({ 
       detail: { summary: 'Create stops by id proofs', description: 'POST endpoint for stops by id proofs in the drivers module.', tags: ['Drivers'] }, params, body: t.Object({ file: t.File({ maxSize: 5 * 1024 * 1024 }), kind: t.Union([t.Literal("photo"), t.Literal("signature")]), operationKey: t.String({ format: "uuid" }) }) })
   .post("/stops/:id/delivered", ({ user, params, body }) => DriverService.outcome(Number(user.sub), params.id, body, "delivered"), {
       detail: { summary: 'Create stops by id delivered', description: 'POST endpoint for stops by id delivered in the drivers module.', tags: ['Drivers'] }, params, body: t.Object(command) })
+  .post("/stops/:id/plan", ({ user, params, body }) => DriverService.planStop(Number(user.sub), params.id, body.action), {
+    params, body: t.Object({ action: t.Union([t.Literal("skip"), t.Literal("next")]) }),
+    detail: { summary: "Skip or prioritize a pending grouped order", tags: ["Drivers"] } })
   .post("/stops/:id/failed", ({ user, params, body }) => DriverService.outcome(Number(user.sub), params.id, body, "failed"), {
       detail: { summary: 'Create stops by id failed', description: 'POST endpoint for stops by id failed in the drivers module.', tags: ['Drivers'] }, params, body: t.Object({ ...command, reason: t.String({ minLength: 1, maxLength: 500 }) }) });
 

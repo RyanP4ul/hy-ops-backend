@@ -206,8 +206,8 @@ export const userRoutes = new Elysia({
     {
       params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
       detail: {
-        summary: "Deactivate a user",
-        description: "Deactivate a user account without permanently deleting it.",
+        summary: "Archive a user",
+        description: "Archive a user account while retaining historical records.",
         tags: ["Users"]
       }
     },

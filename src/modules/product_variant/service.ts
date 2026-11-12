@@ -1,7 +1,7 @@
 import { db } from "@/db/index";
 import { product_variants } from "@/db/schema/products";
 import { inventory } from "@/db/schema/inventory";
-import { and, asc, count, eq, ilike, notExists } from "drizzle-orm";
+import { and, asc, count, eq, ilike, notExists, sql } from "drizzle-orm";
 
 export abstract class ProductVariantService {
   static async getProductVariants(
@@ -13,7 +13,7 @@ export abstract class ProductVariantService {
     const is_search_empty = search.length === 0;
     const offset = Math.max(page * limit, 0);
 
-    const where = and(!is_search_empty
+    const where = and(sql`exists (select 1 from products lifecycle_p where lifecycle_p.id = ${product_variants.product_id} and lifecycle_p.is_active and not lifecycle_p.is_archived)`, !is_search_empty
       ? ilike(product_variants.sku, `%${search}%`)
       : undefined,
       excludeInventoryWarehouseId === undefined ? undefined : notExists(

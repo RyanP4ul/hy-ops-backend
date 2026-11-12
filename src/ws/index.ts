@@ -27,8 +27,6 @@ export const ws = new Elysia()
       const user_agent = parseUserAgent(ws.data.headers["user-agent"] || null);
       const ip_address = String(ws.data.ip_address) || "unknown";
 	  
-	  logger.debug(`IP Address: ${ip_address}`);
-
       const user: AuthUser = {
         sub: ws.data.user.sub,
         email: ws.data.user.email,
@@ -100,26 +98,28 @@ export const ws = new Elysia()
           logger.warning(`Received null payload from socket id: ${ws.id}`);
           return;
         }
+		
+		if (message.type !== "CHANGE_PAGE") {
+			const log = await sessionService.createWsLogs({
+			  session_id: ws.id,
+			  user_id: session.user.sub,
+			  action: data.type,
+			  payload: JSON.stringify(message.payload),
+			  created_at: Math.floor(Date.now() / 1000),
+			  updated_at: Math.floor(Date.now() / 1000),
+			});
 
-        const log = await sessionService.createWsLogs({
-          session_id: ws.id,
-          user_id: session.user.sub,
-          action: data.type,
-          payload: "[OMITTED]",
-          created_at: Math.floor(Date.now() / 1000),
-          updated_at: Math.floor(Date.now() / 1000),
-        });
-
-        ws.publish(TOPIC.SESSION_AND_LOGS, {
-          type: "WS_LOG_CREATED",
-          payload: {
-            ws_id: log.id,
-            session_id: ws.id,
-            user_id: session.user.sub,
-            action: data.type,
-            payload: "[OMITTED]",
-          },
-        });
+			ws.publish(TOPIC.SESSION_AND_LOGS, {
+			  type: "WS_LOG_CREATED",
+			  payload: {
+				ws_id: log.id,
+				session_id: ws.id,
+				user_id: session.user.sub,
+				action: data.type,
+				payload: JSON.stringify(message.payload),
+			  },
+			});
+		}
 
         // Domain changes are published by successful HTTP mutations. Never trust
         // client-supplied records as authoritative cache updates on other clients.

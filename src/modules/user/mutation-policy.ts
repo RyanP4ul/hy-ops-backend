@@ -20,7 +20,7 @@ export async function lockUserMutation(tx: Transaction, actor: MutationActor) {
   const [current] = await tx.select().from(users)
     .where(and(eq(users.id, actor.id), eq(users.is_archived, false)))
     .for("update");
-  if (!current || current.token_version !== actor.tokenVersion) {
+  if (!current || !current.is_active || current.token_version !== actor.tokenVersion) {
     throw new UserMutationError("Your session is no longer valid. Sign in again.", 401);
   }
   if (current.role !== "admin") {

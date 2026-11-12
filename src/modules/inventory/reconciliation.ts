@@ -34,7 +34,7 @@ export function reconcileReservations(token: string, reason: string, actorId: nu
   if (!reason.trim()) throw new WorkflowError("A reconciliation reason is required.");
   return stockTransaction(async (tx) => {
     const [actor] = await tx.select().from(users).where(eq(users.id, actorId)).for("update");
-    if (!actor || actor.is_archived || actor.role !== "admin") throw new WorkflowError("Only an active administrator can reconcile stock.");
+    if (!actor || !actor.is_active || actor.is_archived || actor.role !== "admin") throw new WorkflowError("Only an active administrator can reconcile stock.");
     const current = await plan(tx);
     if (current.token !== token) throw new WorkflowError("Stock or orders changed. Preview reconciliation again.");
     if (current.issues.length) throw new WorkflowError(current.issues.join(" "));

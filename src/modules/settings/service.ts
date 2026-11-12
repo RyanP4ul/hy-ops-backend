@@ -8,6 +8,7 @@ import { WorkflowError } from "../../utils/workflow-error";
 
 const MOBILE_REFRESH_SETTING = "mobile_automatic_refresh_interval_ms";
 const MOBILE_REFRESH_DEFAULT = "30000";
+export const MOBILE_OFFLINE_WRITES_SETTING = "mobile_offline_delivery_recording_enabled";
 
 export abstract class SettingService {
   static async getAllSettings() {
@@ -30,6 +31,7 @@ export abstract class SettingService {
     // Existing installations can display and save the new setting without reseeding.
     settingsMap[WAREHOUSE_ARRIVAL_SETTING] ??= { id: 0, value: String(WAREHOUSE_ARRIVAL_RADIUS_M), version: 1 };
     settingsMap[MOBILE_REFRESH_SETTING] ??= { id: 0, value: MOBILE_REFRESH_DEFAULT, version: 1 };
+    settingsMap[MOBILE_OFFLINE_WRITES_SETTING] ??= { id: 0, value: "false", version: 1 };
 
     return settingsMap;
   }
@@ -46,6 +48,9 @@ export abstract class SettingService {
 
   static async updateSetting(setting_changes: Omit<SettingSchemaType, "id">[]) {
     for (const setting of setting_changes) {
+      if (setting.name === MOBILE_OFFLINE_WRITES_SETTING && !["true", "false"].includes(setting.value)) {
+        throw new WorkflowError("Offline delivery recording must be true or false.", 400);
+      }
       if (setting.name === MOBILE_REFRESH_SETTING && (!/^\d+$/.test(setting.value) || !Number.isInteger(Number(setting.value)) || Number(setting.value) < 1 || Number(setting.value) > 2147483647)) {
         throw new WorkflowError("Mobile automatic refresh interval must be a whole number from 1 to 2147483647 milliseconds.", 400);
       }
@@ -55,9 +60,9 @@ export abstract class SettingService {
     }
     return await db.transaction(async (tx) => {
       for (const setting of setting_changes) {
-        if (setting.name === WAREHOUSE_ARRIVAL_SETTING || setting.name === MOBILE_REFRESH_SETTING) {
+        if (setting.name === WAREHOUSE_ARRIVAL_SETTING || setting.name === MOBILE_REFRESH_SETTING || setting.name === MOBILE_OFFLINE_WRITES_SETTING) {
           const now = Math.floor(Date.now() / 1000);
-          const defaultValue = setting.name === WAREHOUSE_ARRIVAL_SETTING ? String(WAREHOUSE_ARRIVAL_RADIUS_M) : MOBILE_REFRESH_DEFAULT;
+          const defaultValue = setting.name === WAREHOUSE_ARRIVAL_SETTING ? String(WAREHOUSE_ARRIVAL_RADIUS_M) : setting.name === MOBILE_REFRESH_SETTING ? MOBILE_REFRESH_DEFAULT : "false";
           await tx.insert(settings).values({ name: setting.name, value: defaultValue, created_at: now, updated_at: now })
             .onConflictDoNothing({ target: settings.name });
         }

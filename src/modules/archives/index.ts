@@ -1,4 +1,5 @@
-import { Elysia } from "elysia";
+import { scheduleArchiveDeletion } from "./retention";
+import { Elysia, t } from "elysia";
 import { AuthUser } from "../auth/schema";
 import { UserService } from "../user/service";
 import { UserMutationError } from "../user/mutation-policy";
@@ -20,6 +21,13 @@ export const archivesRoutes = new Elysia({
     if (!actor || actor.token_version !== user.token_version) { set.status = 401; return { message: "Unauthorized" }; }
     if (actor.role !== "admin") { set.status = 403; return { message: "Only administrators can access archives." }; }
   })
+  .delete("/:id", ({ params, user, set }) => {
+    set.status = 202;
+    return scheduleArchiveDeletion(params.id, { id: Number(user.sub), tokenVersion: Number(user.token_version) });
+  }, {
+    params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+    detail: { summary: "Schedule archived record deletion", description: "Keep the record archived for 30 days after confirmation, then automatically delete it if dependencies permit.", tags: ["Archives"] },
+  })
   .get("/", async ({ set, query }) => {
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;
@@ -30,8 +38,8 @@ export const archivesRoutes = new Elysia({
     return result.rows;
   }, {
     detail: {
-      summary: "Get archived users",
-      description: "Retrieve archived user accounts with pagination.",
+      summary: "Get archived records",
+      description: "Retrieve archived records with pagination.",
       tags: ["Archives"],
     },
   })
@@ -40,8 +48,8 @@ export const archivesRoutes = new Elysia({
     return await ArchiveService.restoreArchive(archiveId, { id: Number(user.sub), tokenVersion: Number(user.token_version) });
   }, {
     detail: {
-      summary: "Restore an archived user",
-      description: "Restore an archived user account by its identifier.",
+      summary: "Restore an archived record",
+      description: "Restore an archived record account by its identifier.",
       tags: ["Archives"],
     },
   });

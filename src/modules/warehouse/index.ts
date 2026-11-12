@@ -1,7 +1,8 @@
+import { activeWarehouse } from "../lifecycle/availability";
 import { staffWarehouse } from "../deliveries/scope";
 import { db } from "../../db";
 import { warehouses } from "../../db/schema/warehouses";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { logger } from "../../utils/logger";
 import { ArchiveService } from "../archives/service";
 import { AuthUser } from "../auth/schema";
@@ -30,7 +31,7 @@ export const warehouseRoutes = new Elysia({ prefix: "/warehouses" })
   .get("/names", async ({ query, set, user }) => {
     const scope = await staffWarehouse(user);
     if (scope !== undefined) {
-      const rows = await db.select().from(warehouses).where(eq(warehouses.id, scope));
+      const rows = await db.select().from(warehouses).where(and(eq(warehouses.id, scope), activeWarehouse()));
       return { rows, total: rows.length };
     }
     const page = query.page ? parseInt(query.page) : 0;
@@ -113,6 +114,7 @@ export const warehouseRoutes = new Elysia({ prefix: "/warehouses" })
         user.sub,
         Number(params.id),
         Number(query.version || 0),
+        Number(user.token_version),
       );
     },
     {

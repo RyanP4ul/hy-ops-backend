@@ -61,6 +61,7 @@ async function runAndRecord(
       .set({
         status: "FAILED",
         last_run_at: lastRunAt,
+        next_run_at: new Date(Date.now() + interval),
         last_error: error instanceof Error ? error.message : String(error),
         updated_at: new Date(),
       })
@@ -184,7 +185,7 @@ async function checkLowStock() {
   );
 }
 
-async function checkOverduePayments() {
+export function findOverduePayments() {
   const now = new Date();
   const net30Cutoff = new Date(now);
   net30Cutoff.setDate(net30Cutoff.getDate() - 30);
@@ -194,7 +195,7 @@ async function checkOverduePayments() {
       orderId: order_items.order_id,
       total: sql<string | null>`case
         when count(*) > 0 and bool_and(${order_items.unit_price_snapshot} is not null)
-        then sum(${order_items.quantity} * ${order_items.unit_price_snapshot})::text
+        then sum(${order_items.quantity} * ${order_items.unit_price_snapshot})
         else null
       end`.as("order_total"),
     })
@@ -211,7 +212,7 @@ async function checkOverduePayments() {
     .groupBy(payments.order_id)
     .as("automation_paid_totals");
 
-  const overdueRows = await db
+  return db
     .select({
       orderId: orders.id,
       orderNumber: orders.order_number,
@@ -240,6 +241,10 @@ async function checkOverduePayments() {
       ),
     );
 
+}
+
+async function checkOverduePayments() {
+  const overdueRows = await findOverduePayments();
   if (overdueRows.length === 0) {
     return;
   }
@@ -257,13 +262,6 @@ async function checkOverduePayments() {
       ),
     );
 
-  const preview = overdueRows
-    .slice(0, 3)
-    .map(({ orderNumber }) => orderNumber)
-    .join(", ");
-  const suffix =
-    overdueRows.length > 3 ? ` and ${overdueRows.length - 3} more` : "";
-
   for (const { orderNumber } of overdueRows) {
     await createNotifications(
       await getRecipientIds(),
@@ -272,13 +270,6 @@ async function checkOverduePayments() {
       "OVERDUE_PAYMENT",
     );
   }
-
-  // await createNotifications(
-  //   await getRecipientIds(),
-  //   "Overdue payments detected",
-  //   `${overdueRows.length} order payment(s) are overdue: ${preview}${suffix}.`,
-  //   "OVERDUE_PAYMENT",
-  // );
 
   logger.info(
     `[Automation] Overdue payment checker found ${overdueRows.length} order(s).`,
@@ -349,12 +340,12 @@ export async function configureAutomationTask(automation: AutomationSelect) {
     );
 
   if (taskManager.has(runtimeTask.name)) {
-    await taskManager.updateInterval(runtimeTask.name, automation.interval_ms);
+    await taskManager.updateInterval(runtimeTask.name, automation.interval_ms, callback);
   } else {
     taskManager.register(runtimeTask.name, automation.interval_ms, callback);
   }
 
-  if (automation.status === "ENABLED") {
+  if (automation.status !== "DISABLED") {
     await taskManager.start(runtimeTask.name);
   } else {
     taskManager.stop(runtimeTask.name);
@@ -362,6 +353,9 @@ export async function configureAutomationTask(automation: AutomationSelect) {
 }
 
 export async function startAutomationTasks() {
+  await db.delete(automations).where(inArray(automations.name, [
+    "Notification Cleanup", "Daily Summary Preview",
+  ]));
   const registeredAutomations = await db
     .select()
     .from(automations)

@@ -20,6 +20,7 @@ export const warehouses = pgTable("warehouses", {
   longitude: numeric(),
   pickup_contact_name: varchar(),
   pickup_contact_phone: varchar(),
+  is_active: boolean().notNull().default(true),
   version: integer().notNull().default(1),
   is_archived: boolean().notNull().default(false),
   archived_at: integer(),

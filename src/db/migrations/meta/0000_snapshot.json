@@ -1,5 +1,5 @@
 {
-  "id": "71218fc1-654a-45b8-83e3-df89a6658611",
+  "id": "74736df8-bb45-4294-8fff-eea7cfbf32e6",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -48,9 +48,49 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true
+        },
+        "deletion_requested_at": {
+          "name": "deletion_requested_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "delete_after": {
+          "name": "delete_after",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "deletion_error": {
+          "name": "deletion_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "deletion_last_attempt_at": {
+          "name": "deletion_last_attempt_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "archives_delete_after_idx": {
+          "name": "archives_delete_after_idx",
+          "columns": [
+            {
+              "expression": "delete_after",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "archives_archived_by_users_id_fk": {
           "name": "archives_archived_by_users_id_fk",
@@ -69,7 +109,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "archives_retention_valid": {
+          "name": "archives_retention_valid",
+          "value": "(\"archives\".\"deletion_requested_at\" is null and \"archives\".\"delete_after\" is null) or (\"archives\".\"deletion_requested_at\" is not null and \"archives\".\"delete_after\" is not null and \"archives\".\"deletion_requested_at\" >= \"archives\".\"archived_at\" and \"archives\".\"delete_after\" >= \"archives\".\"deletion_requested_at\" + 2592000)"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.audit_logs": {
@@ -801,6 +846,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": 1
+        },
+        "driver_stop_plan": {
+          "name": "driver_stop_plan",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -1656,6 +1707,80 @@
       },
       "isRLSEnabled": false
     },
+    "public.driver_sync_receipts": {
+      "name": "driver_sync_receipts",
+      "schema": "",
+      "columns": {
+        "operation_key": {
+          "name": "operation_key",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "actor_id": {
+          "name": "actor_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_hash": {
+          "name": "request_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "result": {
+          "name": "result",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "driver_sync_receipts_actor_idx": {
+          "name": "driver_sync_receipts_actor_idx",
+          "columns": [
+            {
+              "expression": "actor_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "driver_sync_receipts_actor_id_users_id_fk": {
+          "name": "driver_sync_receipts_actor_id_users_id_fk",
+          "tableFrom": "driver_sync_receipts",
+          "tableTo": "users",
+          "columnsFrom": [
+            "actor_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.inventory": {
       "name": "inventory",
       "schema": "",
@@ -1707,6 +1832,26 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
+        },
+        "is_archived": {
+          "name": "is_archived",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "archived_at": {
+          "name": "archived_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
         },
         "version": {
           "name": "version",
@@ -2384,7 +2529,7 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "default": 1794317500
+          "default": 1794398274
         }
       },
       "indexes": {
@@ -3488,6 +3633,26 @@
           "primaryKey": false,
           "notNull": true
         },
+        "is_archived": {
+          "name": "is_archived",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "archived_at": {
+          "name": "archived_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
         "version": {
           "name": "version",
           "type": "integer",
@@ -4012,6 +4177,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
         "version": {
           "name": "version",
           "type": "integer",
@@ -4110,11 +4282,25 @@
           "notNull": true,
           "default": "'truck'"
         },
-        "image": {
-          "name": "image",
-          "type": "varchar(255)",
+        "is_archived": {
+          "name": "is_archived",
+          "type": "boolean",
           "primaryKey": false,
-          "notNull": true
+          "notNull": true,
+          "default": false
+        },
+        "archived_at": {
+          "name": "archived_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
         },
         "version": {
           "name": "version",
@@ -4246,6 +4432,13 @@
           "type": "varchar",
           "primaryKey": false,
           "notNull": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
         },
         "version": {
           "name": "version",

@@ -1,9 +1,12 @@
 import Elysia, { t } from "elysia";
 import { InvoiceService } from "./service";
+import type { AuthUser } from "../auth/schema";
+import { assertOrderScope, staffWarehouse } from "../deliveries/scope";
 
-export const invoiceRoutes = new Elysia({ prefix: "/invoice" }).get(
+export const invoiceRoutes = new Elysia({ prefix: "/invoice" }).decorate("user", {} as AuthUser).get(
   "/:order_id",
-  async ({ params }) => {
+  async ({ params, user }) => {
+    await assertOrderScope(params.order_id, await staffWarehouse(user));
     return await InvoiceService.getInvoiceByOrderId(params.order_id);
   },
   {

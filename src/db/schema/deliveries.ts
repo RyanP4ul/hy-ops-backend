@@ -2,6 +2,7 @@ import {
   check,
   date,
   integer,
+  jsonb,
   numeric,
   pgEnum,
   pgTable,
@@ -15,6 +16,12 @@ import { users } from "./users";
 import { vehicles } from "./vehicles";
 import { orders } from "./order";
 import { sql } from "drizzle-orm";
+
+export type DriverStopPlan = {
+  driverId: number;
+  nextStopId: number | null;
+  skippedStopIds: number[];
+};
 
 export const delivery_type = pgEnum("delivery_type", [
   "LALAMOVE",
@@ -64,6 +71,7 @@ export const deliveries = pgTable(
     delivery_type: delivery_type("delivery_type").notNull().default("INTERNAL"),
     status: deliveries_status().notNull().default("scheduled"),
     version: integer().notNull().default(1),
+    driver_stop_plan: jsonb().$type<DriverStopPlan>(),
     created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
     updated_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
