@@ -10,6 +10,7 @@ import { deliveries } from "../../../db/schema/deliveries";
 import { and, eq, inArray } from "drizzle-orm";
 import { recordPosition } from "../../../modules/fleet-map/fleet.service";
 import { TOPIC } from "../../topic";
+import { receiveDriverLocation } from "../../../modules/deliveries/staff-notifications";
 
 // {
 //   "delivery_id": "your_delivery_id",
@@ -59,6 +60,7 @@ export class CreateNotificationHandler extends RequestBase<
     if (delivery) {
       const result = await recordPosition(delivery.vehicle_id, { latitude, longitude, heading, speedKph: speed * 3.6, accuracyM: accuracy, recordedAt: recorded_at });
       if (!result.accepted) return;
+      await receiveDriverLocation(delivery.id, actorId);
     }
     // Idle fixes are live driver events, never attributed to an unrelated vehicle.
     const event = {

@@ -1,4 +1,4 @@
-import { count, desc, eq, ilike, or } from "drizzle-orm";
+import { count, desc, eq, ilike, or, sql } from "drizzle-orm";
 import { redactAuditPayload } from "../../utils/audit";
 import { db } from "../../db";
 import { audit_logs, auditLogsInsert, users } from "../../db/schema";
@@ -19,15 +19,22 @@ const serialize = (value: unknown) => {
 
 export abstract class AuditLogService {
   static async createAuditLog(data: AuditLogData) {
-    const [log] = await db
-      .insert(audit_logs)
-      .values({
-        ...data,
-        created_at: data.created_at ?? Math.floor(Date.now() / 1000),
-      })
-      .returning({ id: audit_logs.id });
+    return db.transaction(async (tx) => {
+      const [log] = await tx
+        .insert(audit_logs)
+        .values({
+          ...data,
+          created_at: data.created_at ?? Math.floor(Date.now() / 1000),
+        })
+        .returning({ id: audit_logs.id });
 
-    return log;
+      // PostgreSQL publishes only after commit, including logs outside HTTP hooks.
+      // The event contains no audit contents or user data.
+      await tx.execute(sql`select pg_notify('hyops_resource_changed', ${JSON.stringify({
+        type: "RESOURCE_CHANGED", payload: { resource: "audit-logs", eventId: crypto.randomUUID() },
+      })})`);
+      return log;
+    });
   }
 
   static async createHttpAuditLog({

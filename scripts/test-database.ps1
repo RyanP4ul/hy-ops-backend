@@ -1,4 +1,4 @@
-param([ValidateSet('Database', 'Driver', 'Sync', 'Live', 'Mobile', 'Backup', 'Realtime', 'Lalamove', 'Lifecycle', 'LifecycleRegression', 'Retention', 'RetentionBrowser')][string]$Suite = 'Database', [ValidateSet('All', 'Selected', 'DashboardReports', 'Orders', 'Deliveries', 'UIUX', 'Operations', 'Authorization', 'Driver')][string]$BrowserScope = 'All', [string]$BrowserFilter = '')
+param([ValidateSet('Database', 'Driver', 'Sync', 'Live', 'Mobile', 'Backup', 'Realtime', 'Lalamove', 'Lifecycle', 'LifecycleRegression', 'Retention', 'RetentionBrowser', 'DeliveryNotifications', 'RealtimePages')][string]$Suite = 'Database', [ValidateSet('All', 'Selected', 'DashboardReports', 'Orders', 'Deliveries', 'UIUX', 'Operations', 'Authorization', 'Driver')][string]$BrowserScope = 'All', [string]$BrowserFilter = '')
 $ErrorActionPreference = 'Stop'
 $backendRoot = Split-Path -Parent $PSScriptRoot
 function Get-FixtureMigration([string]$Name) {
@@ -40,7 +40,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Fixture schema creation failed.' }
   # Reconstruct only the columns/tables changed by the incremental migrations.
   # The target is always the new, empty loopback fixture created above.
-  if ($Suite -notin @('Sync', 'Lifecycle', 'LifecycleRegression', 'Retention', 'RetentionBrowser')) {
+  if ($Suite -notin @('Sync', 'Lifecycle', 'LifecycleRegression', 'Retention', 'RetentionBrowser', 'DeliveryNotifications', 'RealtimePages')) {
   $legacyPath = Join-Path $fixtureRoot 'legacy-columns.sql'
   @'
 DROP TABLE payment_group_allocations;
@@ -99,7 +99,21 @@ ALTER TABLE vehicles ADD COLUMN image varchar(255) NOT NULL DEFAULT '';
     if ($LASTEXITCODE -ne 0) { throw 'Retention migration failed.' }
   }
   $env:HYOPS_TEST_DATABASE_URL = "postgres://hyops_test@127.0.0.1:$fixturePort/hyops_test"
-  if ($Suite -eq 'Sync') {
+  if ($Suite -eq 'RealtimePages') {
+    & bun test --timeout 60000 ./tests/driver-socket.test.ts -t 'page realtime'
+    if ($LASTEXITCODE -ne 0) { throw 'Page realtime subscription tests failed.' }
+  }
+  elseif ($Suite -eq 'DeliveryNotifications') {
+    & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -c 'ALTER TABLE deliveries DROP COLUMN location_tracking_started_at, DROP COLUMN last_location_received_at, DROP COLUMN location_alerted_at, DROP COLUMN location_alert_count'
+    if ($LASTEXITCODE -ne 0) { throw 'Pre-notification fixture setup failed.' }
+    & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Get-FixtureMigration '0001_delivery_staff_notifications.sql')
+    if ($LASTEXITCODE -ne 0) { throw 'Delivery notification migration failed.' }
+    & bun test --timeout 60000 ./tests/delivery-staff-notifications.test.ts
+    if ($LASTEXITCODE -ne 0) { throw 'Delivery notification database tests failed.' }
+    & bun test --timeout 60000 ./tests/driver-socket.test.ts -t 'delivery notification'
+    if ($LASTEXITCODE -ne 0) { throw 'Delivery notification socket test failed.' }
+  }
+  elseif ($Suite -eq 'Sync') {
     # The receipt table may now be part of the user's consolidated baseline.
     $receiptMigration = Join-Path $backendRoot 'src/db/migrations/0001_driver_sync_receipts.sql'
     if (Test-Path -LiteralPath $receiptMigration) {

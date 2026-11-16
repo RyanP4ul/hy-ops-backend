@@ -1,162 +1,67 @@
 import { Elysia, t } from "elysia";
-import { getDrivingRoute } from "./osrm";
+import { buildRoutePoints, getGoogleDrivingRoute } from "./google-routes";
 import { estimateDeliveryExpenses } from "./delivery-expense";
-import {
-  detectTollRoads,
-  detectTollRoadsFromOsrmRoadNames,
-  unavailableTollDetection,
-  type TollDetectionResult,
-} from "./toll-detection";
 
-type Coordinate = { latitude: number; longitude: number };
+function configuredNumber(name: string, fallback: number, allowZero = false) {
+  const raw = process.env[name];
+  const value = raw?.trim() ? Number(raw) : fallback;
+  if (!Number.isFinite(value) || (allowZero ? value < 0 : value <= 0)) throw new Error(`Invalid backend configuration: ${name}.`);
+  return value;
+}
 
-function sameCoordinate(a: Coordinate, b: Coordinate): boolean {
-  return (
-    Math.abs(a.latitude - b.latitude) < 1e-7 &&
-    Math.abs(a.longitude - b.longitude) < 1e-7
-  );
+export function expenseDefaults() {
+  return {
+    fuelConsumptionKmPerLiter: configuredNumber("DELIVERY_FUEL_KM_PER_LITER", 6),
+    fuelPricePerLiter: configuredNumber("DELIVERY_FUEL_PRICE_PHP", 65, true),
+  };
 }
 
 export const deliveryEstimateRoutes = new Elysia({
-  prefix: "/delivery-estimates",
-  detail: { tags: ["Delivery Expenses"] },
-}).post(
-  "/",
-  async ({ body, set }) => {
+  prefix: "/delivery-estimates", detail: { tags: ["Delivery Expenses"] },
+})
+  .get("/config", () => expenseDefaults())
+  .post("/", async ({ body, set }) => {
     try {
-      // `points` are visited in the supplied order: warehouse, delivery stops,
-      // and optionally the warehouse again when isRoundTrip is true.
-      const routePoints = [...body.points];
-      if (body.isRoundTrip) {
-        const firstPoint = routePoints[0]!;
-        const lastPoint = routePoints[routePoints.length - 1]!;
-        if (!sameCoordinate(firstPoint, lastPoint)) {
-          routePoints.push(firstPoint);
-        }
-      }
-
-      const route = await getDrivingRoute(routePoints);
-
-      let osmDetection: TollDetectionResult;
-      try {
-        osmDetection = await detectTollRoads(route.osmNodeIds);
-      } catch (error) {
-        const details = error instanceof Error ? error.message : String(error);
-        console.warn("[HYOps] OpenStreetMap toll-tag lookup failed:", details);
-        osmDetection = unavailableTollDetection(details);
-      }
-
-      // Fall back to OSRM road names if OSM toll tags are unavailable or no tags matched.
-      const osrmNameDetection =
-        osmDetection.status === "DETECTED"
-          ? null
-          : detectTollRoadsFromOsrmRoadNames(route.roadSegments);
-      const tollDetection = osrmNameDetection ?? osmDetection;
-
-      if (osmDetection.status === "UNAVAILABLE" && !osrmNameDetection) {
-        const uniqueRoadNames = [
-          ...new Map(
-            route.roadSegments
-              .filter((segment) => segment.name || segment.ref)
-              .map((segment) => [
-                `${segment.ref ?? ""}|${segment.name ?? ""}`,
-                { name: segment.name, ref: segment.ref },
-              ]),
-          ).values(),
-        ];
-        console.warn("[HYOps] OSRM name fallback found no known expressway name. Route names/refs:", uniqueRoadNames);
-      }
-
-      const tollFeeOverride = body.tollFeeOverride;
-      const tollFeeIsKnown = tollFeeOverride !== undefined;
-      const estimatedTollFee = tollFeeOverride ?? null;
-      const calculationHasToll =
-        tollDetection.hasToll === true ||
-        (tollFeeOverride !== undefined && tollFeeOverride > 0);
-
-      // The distance already includes the return leg when a round trip was requested.
-      // Therefore don't double it again inside the expense calculator.
+      const points = buildRoutePoints(body.points, body.isRoundTrip);
+      const defaults = expenseDefaults();
+      const fuelConsumptionKmPerLiter = body.fuelConsumptionKmPerLiter ?? defaults.fuelConsumptionKmPerLiter;
+      const fuelPricePerLiter = body.fuelPricePerLiter ?? defaults.fuelPricePerLiter;
+      const route = await getGoogleDrivingRoute(points);
+      const estimatedTollFee = body.tollFeeOverride ?? route.estimatedTollFee;
+      const hasToll = route.hasToll || (body.tollFeeOverride ?? 0) > 0;
       const estimate = estimateDeliveryExpenses({
-        distanceKm: route.distanceKm,
-        isRoundTrip: false,
-        allowanceTiers: [
-          { maxKm: 10, amount: 150 },
-          { maxKm: 25, amount: 250 },
-          { maxKm: 50, amount: 400 },
-          { maxKm: 100, amount: 600 },
-        ],
-        allowanceOverMax: 800,
-        fuelConsumptionKmPerLiter: 6,
-        fuelPricePerLiter: 65,
-        hasToll: calculationHasToll,
-        estimatedTollFee: tollFeeOverride ?? 0,
+        distanceKm: route.distanceKm, isRoundTrip: false,
+        allowanceTiers: [{ maxKm: 10, amount: 150 }, { maxKm: 25, amount: 250 }, { maxKm: 50, amount: 400 }, { maxKm: 100, amount: 600 }],
+        allowanceOverMax: 800, fuelConsumptionKmPerLiter, fuelPricePerLiter,
+        hasToll, estimatedTollFee: estimatedTollFee ?? 0,
       });
-
-      const estimatedTotalExcludingUnknownToll =
-        estimate.driverAllowance + estimate.estimatedFuelCost;
-      const estimatedTotal = tollFeeIsKnown
-        ? estimatedTotalExcludingUnknownToll + (estimatedTollFee ?? 0)
-        : null;
-
+      const subtotal = estimate.driverAllowance + estimate.estimatedFuelCost;
       return {
-        route: {
-          distanceKm: route.distanceKm,
-          durationMinutes: Math.round(route.durationSeconds / 60),
-          geometry: route.geometry,
-          inputPointCount: body.points.length,
-          routeWaypointCount: route.waypoints.length,
-          legCount: route.legCount,
-          isRoundTrip: body.isRoundTrip,
-          waypoints: route.waypoints,
+        route: { source: "Google Routes", distanceKm: route.distanceKm,
+          durationMinutes: Math.round(route.durationSeconds / 60), geometry: route.geometry,
+          inputPointCount: body.points.length, routeWaypointCount: points.length,
+          legCount: route.legCount, isRoundTrip: body.isRoundTrip },
+        tollDetection: {
+          status: hasToll ? "DETECTED" : "NO_TOLL_EXPECTED", hasToll, source: "Google Routes",
+          note: "Google toll coverage varies by location. Prices apply to non-commercial vehicles; verify the toll class for delivery trucks. An unavailable price requires manual entry.",
         },
-        tollDetection,
-        expenses: {
-          ...estimate,
-          hasToll: tollDetection.hasToll,
-          estimatedTollFee,
-          estimatedTotal,
-          estimatedTotalExcludingUnknownToll,
-          tollFeeStatus:
-            tollFeeOverride !== undefined
-              ? "MANUAL_OVERRIDE"
-              : tollDetection.status === "UNAVAILABLE"
-                ? "DETECTION_UNAVAILABLE"
-                : tollDetection.hasToll === true
-                  ? "MANUAL_ENTRY_REQUIRED"
-                  : "NO_TOLL_TAG_FOUND",
-        },
+        expenses: { ...estimate, hasToll, estimatedTollFee,
+          estimatedTotal: estimatedTollFee === null ? null : subtotal + estimatedTollFee,
+          estimatedTotalExcludingUnknownToll: subtotal,
+          tollFeeStatus: body.tollFeeOverride !== undefined ? "MANUAL_OVERRIDE" : route.tollFeeStatus,
+          fuelConsumptionKmPerLiter, fuelPricePerLiter, fuelSource: "DISTANCE_AND_VEHICLE_EFFICIENCY" },
       };
     } catch (error) {
-      console.error("[HYOps] Failed to calculate delivery estimate:", error);
       set.status = 422;
-      return {
-        message:
-          error instanceof Error
-            ? error.message
-            : "Unable to estimate delivery expenses.",
-      };
+      return { message: error instanceof Error ? error.message : "Unable to estimate delivery expenses." };
     }
-  },
-  {
+  }, {
     body: t.Object({
-      points: t.Array(
-        t.Object({
-          latitude: t.Number({ minimum: -90, maximum: 90 }),
-          longitude: t.Number({ minimum: -180, maximum: 180 }),
-        }),
-        { minItems: 2, maxItems: 30 },
-      ),
+      points: t.Array(t.Object({ latitude: t.Number({ minimum: -90, maximum: 90 }), longitude: t.Number({ minimum: -180, maximum: 180 }) }), { minItems: 2, maxItems: 26 }),
       isRoundTrip: t.Boolean(),
-      /** Optional fee for the complete trip, including return leg when applicable. */
+      fuelConsumptionKmPerLiter: t.Optional(t.Number({ exclusiveMinimum: 0 })),
+      fuelPricePerLiter: t.Optional(t.Number({ minimum: 0 })),
       tollFeeOverride: t.Optional(t.Number({ minimum: 0 })),
-      // Deprecated compatibility fields; toll detection is automatic.
-      hasToll: t.Optional(t.Boolean()),
-      estimatedTollFee: t.Optional(t.Number({ minimum: 0 })),
     }),
-    detail: {
-      summary: "Estimate delivery expenses",
-      description: "Calculate route distance, toll detection, and estimated delivery expenses.",
-      tags: ["Delivery Expenses"],
-    },
-  },
-);
+    detail: { summary: "Estimate delivery expenses using Google Routes", tags: ["Delivery Expenses"] },
+  });

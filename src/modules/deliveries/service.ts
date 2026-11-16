@@ -5,6 +5,7 @@ import { isWarehouseArrival, parseWarehouseArrivalRadius, WAREHOUSE_ARRIVAL_RADI
 import { settings } from "../../db/schema/settings";
 import { vehicle_positions } from "../../db/schema/vehicle-position";
 import { queueDeliveryNotifications, queueDeliveryEventNotifications } from "./notification-queue";
+import { notifyDeliveryStaff } from "./staff-notifications";
 import { customer_returns } from "../../db/schema/customer-returns";
 import { driver_stop_outcomes } from "../../db/schema/driver-outcomes";
 import { assertDeliveryScope } from "./scope";
@@ -706,6 +707,9 @@ export abstract class DeliveryService {
         .update(deliveries)
         .set({
           status: "in_transit",
+          location_tracking_started_at: new Date(),
+          last_location_received_at: null,
+          location_alerted_at: null,
           version: sql`${deliveries.version} + 1`,
           updated_at: new Date(),
         })
@@ -960,6 +964,9 @@ export abstract class DeliveryService {
           updated_at: new Date(),
         })
         .where(eq(deliveries.id, deliveryId));
+
+      await notifyDeliveryStaff(tx, delivery, `Delivery completed: Delivery #${deliveryId}`,
+        `Delivery #${deliveryId} has changed to COMPLETED.`, "DELIVERY_COMPLETED");
 
       await tx
         .update(vehicles)

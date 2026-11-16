@@ -115,6 +115,10 @@ CREATE TABLE "deliveries" (
 	"status" "deliveries_status" DEFAULT 'scheduled' NOT NULL,
 	"version" integer DEFAULT 1 NOT NULL,
 	"driver_stop_plan" jsonb,
+	"location_tracking_started_at" timestamp with time zone,
+	"last_location_received_at" timestamp with time zone,
+	"location_alerted_at" timestamp with time zone,
+	"location_alert_count" integer DEFAULT 0 NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "unique_delivery" UNIQUE("driver_id","scheduled_date","departure_time")
@@ -315,7 +319,7 @@ CREATE TABLE "notifications" (
 	"message" text NOT NULL,
 	"type" varchar(50) NOT NULL,
 	"is_read" boolean DEFAULT false NOT NULL,
-	"created_at" integer DEFAULT 1794398274 NOT NULL,
+	"created_at" integer DEFAULT 1794565844 NOT NULL,
 	CONSTRAINT "notifications_user_title_unique_idx" UNIQUE("user_id","title")
 );
 --> statement-breakpoint

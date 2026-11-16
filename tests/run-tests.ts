@@ -1,4 +1,6 @@
 // Isolate route module mocks from real-service/database tests.
+const deliveryStaffResult = Bun.spawnSync([process.execPath, "test", "tests/delivery-staff-notifications.test.ts"], { stdout: "inherit", stderr: "inherit" });
+if (deliveryStaffResult.exitCode !== 0) process.exit(deliveryStaffResult.exitCode);
 const automationRuntimeResult = Bun.spawnSync([process.execPath, "test", "tests/automation-runtime.test.ts"], { stdout: "inherit", stderr: "inherit" });
 if (automationRuntimeResult.exitCode !== 0) process.exit(automationRuntimeResult.exitCode);
 const reportAutomationResult = Bun.spawnSync([process.execPath, "test", "tests/report-automation.test.ts"], { stdout: "inherit", stderr: "inherit" });
@@ -13,7 +15,7 @@ const backupResult = Bun.spawnSync([process.execPath, "test", "tests/backup-sche
 if (backupResult.exitCode !== 0) process.exit(backupResult.exitCode);
 const paymentTypeResult = Bun.spawnSync([process.execPath, "test", "tests/payment-type.test.ts"], { stdout: "inherit", stderr: "inherit" });
 if (paymentTypeResult.exitCode !== 0) process.exit(paymentTypeResult.exitCode);
-for (const file of ["tests/payment-allocation.test.ts", "tests/order-batch-model.test.ts", "tests/warehouse-arrival.test.ts", "src/utils/correctness.test.ts", "tests/report-finance.test.ts", "src/modules/user/index.test.ts", "tests/transactions.test.ts", "tests/lifecycle.test.ts", "tests/archive-retention.test.ts", "tests/driver.test.ts", "tests/customer-returns.test.ts", "tests/communications.test.ts", "tests/driver-features.test.ts"]) {
+for (const file of ["tests/delivery-estimates.test.ts", "tests/payment-allocation.test.ts", "tests/order-batch-model.test.ts", "tests/warehouse-arrival.test.ts", "src/utils/correctness.test.ts", "tests/report-finance.test.ts", "src/modules/user/index.test.ts", "tests/transactions.test.ts", "tests/lifecycle.test.ts", "tests/archive-retention.test.ts", "tests/driver.test.ts", "tests/customer-returns.test.ts", "tests/communications.test.ts", "tests/driver-features.test.ts"]) {
   const result = Bun.spawnSync([process.execPath, "test", file], { stdout: "inherit", stderr: "inherit" });
   if (result.exitCode !== 0) process.exit(result.exitCode);
 }

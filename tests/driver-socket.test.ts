@@ -59,6 +59,71 @@ describe.skipIf(!url)("driver WebSocket integration", () => {
       method: "POST", headers: { ...(cookie ? { Cookie: cookie } : {}), Origin: origin },
     }));
   }
+  test("page realtime subscriptions receive committed changes and audit logs on all requested pages", async () => {
+    const cookie = await login("admin@example.test", false);
+    const observer = await connect(cookie);
+    // listen() starts async lifecycle hooks. Wait for the PostgreSQL listener
+    // before measuring HTTP events, rather than depending on startup timing.
+    const ready = crypto.randomUUID();
+    const deadline = Date.now() + 5000;
+    while (!observer.messages.some(m => m.payload?.eventId === ready) && Date.now() < deadline) {
+      await database.notify("hyops_resource_changed", JSON.stringify({ type: "RESOURCE_CHANGED", payload: { resource: "calendar", eventId: ready } }));
+      await Bun.sleep(20);
+    }
+    expect(observer.messages.some(m => m.payload?.eventId === ready)).toBe(true);
+    const topics = ["dashboard", "analysis-reports", "calendar", "orders", "products", "users", "settings", "audit-logs"];
+    for (const topic of topics) {
+      observer.socket.send(JSON.stringify({ type: "CHANGE_PAGE", payload: [topic] }));
+      await waitFor(() => [...require("../src/ws/socket-manager").socketManager.getSockets().values()]
+        .some((session: any) => session.user.sub === "1" && session.page === topic));
+      const before = observer.messages.length;
+      const title = `Live ${topic}`;
+      const response = await app.handle(new Request("http://localhost/calendar/event", {
+        method: "POST", headers: { Cookie: cookie, "content-type": "application/json" },
+        body: JSON.stringify({ title, category: "OTHER", date: "2099-01-01", start_time: "10:00", end_time: "11:00" }),
+      }));
+      expect(response.status).toBe(200);
+      await waitFor(() => observer.messages.slice(before).some(m => m.type === "RESOURCE_CHANGED" && m.payload.resource === "calendar"));
+      await waitFor(() => observer.messages.slice(before).some(m => m.type === "RESOURCE_CHANGED" && m.payload.resource === "audit-logs"));
+      expect(await database`select id from calendar_events where title=${title}`).toHaveLength(1);
+      const event = observer.messages.slice(before).find(m => m.type === "RESOURCE_CHANGED" && m.payload.resource === "audit-logs");
+      expect(Object.keys(event.payload).sort()).toEqual(["eventId", "resource"]);
+    }
+    const before = observer.messages.length;
+    const response = await app.handle(new Request("http://localhost/calendar/event", {
+      method: "POST", headers: { Cookie: cookie, "content-type": "application/json" }, body: JSON.stringify({ title: "invalid" }),
+    }));
+    expect(response.status).toBe(400);
+    await Bun.sleep(100);
+    expect(observer.messages.slice(before).filter(m => m.type === "RESOURCE_CHANGED")).toHaveLength(0);
+  });
+  test("page realtime audit events include direct service writes and are visible only after commit", async () => {
+    const observer = await connect(await login("admin@example.test", false));
+    const before = observer.messages.length;
+    const log = await require("../src/modules/audit_logs/service").AuditLogService.createAuditLog({
+      user_id: 1, action: "Fixture service action", entity_type: "fixture", entity_id: "1", description: "Service write",
+      old_value: "null", new_value: "null", metadata: "{}", ip_address: "127.0.0.1", user_agent: "fixture",
+    });
+    await waitFor(() => observer.messages.slice(before).some(m => m.type === "RESOURCE_CHANGED" && m.payload.resource === "audit-logs"));
+    expect(await database`select id from audit_logs where id=${log.id}`).toHaveLength(1);
+  });
+  test("delivery notification monitor records live GPS and refreshes the staff feed after commit", async () => {
+    const driver = await connect(await login("driver1@example.test", true));
+    const staff = await connect(await login("staff@example.test", false));
+    staff.socket.send(JSON.stringify({ type: "CHANGE_PAGE", payload: ["fleet-map"] }));
+    await Bun.sleep(100);
+    const [run] = await database`select id from deliveries where driver_id=3 and status='in_transit'`;
+    driver.socket.send(JSON.stringify({ type: "DRIVER_LOCATION_UPDATE", payload: [String(run.id), 14.59, 121.01, 10, 5, 90, new Date().toISOString()] }));
+    await waitFor(() => staff.messages.some(m => m.type === "DRIVER_LOCATION_UPDATE"));
+    const [tracking] = await database`select last_location_received_at,location_alerted_at from deliveries where id=${run.id}`;
+    expect(tracking.last_location_received_at).not.toBeNull();
+    expect(tracking.location_alerted_at).toBeNull();
+    await database`update deliveries set last_location_received_at=now()-interval '3 minutes' where id=${run.id}`;
+    await require("../src/modules/deliveries/staff-notifications").checkStoppedDeliveryLocations();
+    await waitFor(() => staff.messages.some(m => m.type === "RESOURCE_CHANGED" && m.payload.resource === "notifications"));
+    expect(await database`select * from notifications where user_id=2 and type='DELIVERY_LOCATION_STOPPED'`).toHaveLength(1);
+    expect(driver.messages.some(m => m.type === "RESOURCE_CHANGED" && m.payload.resource === "notifications")).toBe(false);
+  });
   test("browser ticket upgrades without cookies; tickets are hashed, single use and expire", async () => {
     expect((await ticketResponse()).status).toBe(401);
     const cookie = await login("staff@example.test", false);

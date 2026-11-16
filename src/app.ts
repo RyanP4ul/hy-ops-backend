@@ -3,6 +3,7 @@ import { lifecycleRoutes } from "./modules/lifecycle";
 import { openapi } from '@elysia/openapi'
 import type { SmsGateway } from "./modules/sms/service";
 import { startDeliveryNotificationWorker } from "./modules/deliveries/notification-worker";
+import { startDeliveryLocationMonitor } from "./modules/deliveries/staff-notifications";
 import { startDriverEvents } from "./modules/driver/assignment-events";
 import { authorizeClaims, allowedOrigin } from "./modules/auth/policy";
 import { consumeWsTicket } from "./modules/auth/ws-ticket";
@@ -65,6 +66,7 @@ export function createApp(
   const authenticatedClaims = new WeakMap<Request, Record<string, any>>();
   let driverEvents: Awaited<ReturnType<typeof startDriverEvents>> | undefined;
   let deliveryNotifications: ReturnType<typeof startDeliveryNotificationWorker> | undefined;
+  let deliveryLocationMonitor: ReturnType<typeof startDeliveryLocationMonitor> | undefined;
   let retentionWorker: ReturnType<typeof startArchiveRetentionWorker> | undefined;
   let backupScheduler: Awaited<ReturnType<typeof startBackupScheduler>> | undefined;
   let reportScheduler: Awaited<ReturnType<typeof startReportScheduler>> | undefined;
@@ -81,6 +83,7 @@ export function createApp(
         if (options.externalIntegrations !== false) deliveryNotifications = startDeliveryNotificationWorker(options.sms, options.emailSender);
         if (options.externalIntegrations !== false) lalamoveWorker = startLalamoveWorker();
         if (options.automation !== false) {
+          deliveryLocationMonitor = startDeliveryLocationMonitor();
           retentionWorker = startArchiveRetentionWorker();
           await startAutomationTasks();
           if (options.externalIntegrations !== false) backupScheduler = await startBackupScheduler();
@@ -88,6 +91,7 @@ export function createApp(
         }
       })
       .onStop(async () => {
+        await deliveryLocationMonitor?.stop();
         await retentionWorker?.stop();
         backupScheduler?.stop();
         reportScheduler?.stop();
