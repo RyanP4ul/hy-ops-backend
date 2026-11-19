@@ -319,7 +319,7 @@ CREATE TABLE "notifications" (
 	"message" text NOT NULL,
 	"type" varchar(50) NOT NULL,
 	"is_read" boolean DEFAULT false NOT NULL,
-	"created_at" integer DEFAULT 1794565844 NOT NULL,
+	"created_at" integer DEFAULT 1795004616 NOT NULL,
 	CONSTRAINT "notifications_user_title_unique_idx" UNIQUE("user_id","title")
 );
 --> statement-breakpoint

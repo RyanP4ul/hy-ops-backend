@@ -134,6 +134,32 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
       items: [{ inventory_id: stock.id, quantity }] });
   }
 
+  test("warehouse stock can be searched by variant name and includes item measurements", async () => {
+    await seed();
+    await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
+    await sql`update product_variants set weight_kg=3.50, width_value=40, width_unit='cm', length_value=2, length_unit='m' where id=1`;
+    const stock = await InventoryService.getProductByOffset(0, 40, "Fixture variant", "all", 1, null, null, true);
+    expect(stock.total).toBe(1);
+    expect(stock.rows).toMatchObject([{
+      product_name: "Fixture product", variant_name: "Fixture variant", sku: "FIXTURE",
+      warehouse_name: "Fixture", unit: "piece", weight_kg: "3.50", width_value: "40.00",
+      width_unit: "cm", length_value: "2.00", length_unit: "m", quantity: 10, reserved: 0, price: "12.34",
+    }]);
+    const [alternate] = await sql`insert into product_variants (product_id, name, sku, price, unit)
+      values (1, 'Fixture alternate', 'FIXTURE-2', 10, 'piece') returning id`;
+    await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: alternate.id, quantity: 5 });
+    const id = stock.rows[0].id;
+    const app = new Elysia()
+      .derive({ as: "global" }, () => ({ user: { sub: "1", role: "admin" } }))
+      .use(require("../src/modules/inventory").inventoryRoutes);
+    for (const [filter, sku] of [[`ids=${id}`, "FIXTURE"], [`exclude_ids=${id}`, "FIXTURE-2"]]) {
+      const response = await app.handle(new Request(`http://localhost/inventory?warehouse_id=1&active_only=true&search=Fixture&${filter}`));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("X-Total-Count")).toBe("1");
+      expect(await response.json()).toMatchObject([{ sku }]);
+    }
+  });
+
   test("checkout captures address and price; later catalog edits do not change invoice or balance", async () => {
     await seed();
     await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
@@ -424,6 +450,86 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     expect((await OrderService.getSchedulingEntries(0, 10)).rows[0].can_schedule).toBe(false);
   });
 
+  test("grouped orders paginate groups as parent entries, support bulk group actions, and include group_members on detail", async () => {
+    await seed(); await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 100 });
+    await sql`insert into customer_addresses (customer_id,address_line,barangay,city_municipality,province,latitude,longitude) values (1,'456 Second Ave','Second Barangay','Second City','Second Province','14.6','121.2')`;
+    const created = await OrderService.createOrders(batchInput([1, 2, 1]));
+    const single = await stockOrder();
+    const detail = (await OrderService.getOrderById(created[0].id))!;
+    const groupId = detail.order_group_id!;
+
+    expect(detail.group_members).toHaveLength(3);
+    expect(detail.group_members.map((m) => m.id)).toEqual(created.map((c) => c.id));
+
+    const grouped = await OrderService.getGroupedOrders(0, 10, "", "", "id:desc");
+    expect(grouped.total).toBe(2);
+    expect(grouped.rows).toHaveLength(2);
+    const groupEntry = grouped.rows.find((row) => row.entry_type === "GROUP");
+    const singleEntry = grouped.rows.find((row) => row.entry_type === "SINGLE");
+    expect(groupEntry).toBeDefined();
+    expect(singleEntry?.id).toBe(single.id);
+    if (groupEntry?.entry_type === "GROUP") {
+      expect(groupEntry.order_group_id).toBe(groupId);
+      expect(groupEntry.order_group_size).toBe(3);
+      expect(groupEntry.members).toHaveLength(3);
+      expect(groupEntry.status).toBe("PENDING");
+      expect(groupEntry.shipping_address).toBe("2 destinations");
+      expect(groupEntry.destinations).toHaveLength(2);
+      expect(groupEntry.pending_action_count).toBe(3);
+      expect(groupEntry.processing_action_count).toBe(0);
+      expect(groupEntry.total_quantity).toBe(3);
+      expect(groupEntry.total).toBe(37.02);
+    }
+
+    for (const sortKey of ["id", "product_number", "warehouse_name", "customer_name", "item_count", "total"] as const) {
+      const sorted = await OrderService.getGroupedOrders(0, 10, "", "", `${sortKey}:asc`);
+      expect(sorted.total).toBe(2);
+      expect(sorted.rows).toHaveLength(2);
+    }
+
+    // Searching by a child order number finds the parent group entry
+    const byChild = await OrderService.getGroupedOrders(0, 10, detail.order_number);
+    expect(byChild.total).toBe(1);
+    expect(byChild.rows[0]?.entry_type).toBe("GROUP");
+
+    // Cancel one member, process one member -> MIXED status
+    await OrderService.cancelOrder(created[2].id, 1);
+    await OrderService.processOrder(created[0].id, 1);
+    const mixed = await OrderService.getGroupedOrders(0, 10, detail.order_group_number!);
+    const mixedRow = mixed.rows[0];
+    expect(mixedRow?.entry_type).toBe("GROUP");
+    if (mixedRow?.entry_type === "GROUP") {
+      expect(mixedRow.status).toBe("MIXED");
+      expect(mixedRow.status_counts).toEqual({ PROCESSING: 1, PENDING: 1, CANCELLED: 1 });
+      expect(mixedRow.pending_action_count).toBe(1);
+      expect(mixedRow.processing_action_count).toBe(1);
+      expect(mixedRow.active_member_count).toBe(2);
+    }
+
+    // Bulk process remaining pending member(s)
+    const processed = await OrderService.processOrderGroup(groupId);
+    expect(processed.count).toBe(1);
+    expect(processed.updated_ids).toEqual([created[1].id]);
+    await rejected(() => OrderService.processOrderGroup(groupId), "No pending orders");
+
+    // Bulk mark all processing orders ready for delivery
+    const ready = await OrderService.deliveryOrderGroup(groupId);
+    expect(ready.count).toBe(2);
+    expect(ready.updated_ids).toEqual([created[0].id, created[1].id]);
+    const issuedInvoices = await sql`select status from invoices where order_id in ${sql([created[0].id, created[1].id])}`;
+    expect(issuedInvoices.every((row) => row.status === "ISSUED")).toBe(true);
+    await rejected(() => OrderService.deliveryOrderGroup(groupId), "No processing orders");
+
+    const afterReady = await OrderService.getGroupedOrders(0, 10, detail.order_group_number!);
+    const afterRow = afterReady.rows[0];
+    if (afterRow?.entry_type === "GROUP") {
+      expect(afterRow.status).toBe("SCHEDULING");
+      expect(afterRow.ready_for_scheduling_count).toBe(2);
+      expect(afterRow.pending_action_count).toBe(0);
+      expect(afterRow.processing_action_count).toBe(0);
+    }
+  });
+
   test("combined payment persists one receipt source with exact allocations and independent invoices", async () => {
     await seed();
     await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
@@ -456,6 +562,42 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     expect(trip.stops[0]).not.toHaveProperty("combinedPaymentAmount");
   });
 
+  test("grouped payments paginate receipts and return every order when only one matches", async () => {
+    await seed();
+    await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
+    const first = await OrderService.createOrders(combinedInput());
+    const second = await OrderService.createOrders(combinedInput(5));
+    const single = await stockOrder(1, 2);
+    const app = new Elysia().use(require("../src/modules/payments").paymentRoutes);
+
+    const seen = [];
+    for (let page = 0; page < 3; page += 1) {
+      const result = await PaymentService.getGroupedPayments(page, 1, "", "received_amount:desc");
+      expect(result.total).toBe(3);
+      expect(result.rows).toHaveLength(1);
+      seen.push(result.rows[0]);
+    }
+    expect(seen).toMatchObject([
+      { entry_type: "GROUP", received_amount: "10.00", orders: [{ order_id: first[0].id }, { order_id: first[1].id }] },
+      { entry_type: "GROUP", received_amount: "5.00", orders: [{ order_id: second[0].id }, { order_id: second[1].id }] },
+      { entry_type: "SINGLE", payment: { order_id: single.id } },
+    ]);
+    expect(await PaymentService.getGroupedPayments(3, 1)).toEqual({ rows: [], total: 3 });
+    expect((await PaymentService.getGroupedPayments(0, 10, "BANK-ONE-RECEIPT")).total).toBe(2);
+
+    const orderNumber = (await OrderService.getOrderTableRowById(first[0].id))!.product_number;
+    const { rows: [child] } = await PaymentService.getPayments(0, 10, orderNumber);
+    for (const search of [orderNumber, child.payment_number]) {
+      const response = await app.handle(new Request(`http://localhost/payments?grouped=true&limit=1&search=${encodeURIComponent(search)}`));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("X-Total-Count")).toBe("1");
+      expect(await response.json()).toMatchObject([{ entry_type: "GROUP", orders: [
+        { order_id: first[0].id, combined_payment_allocation: "3.33" },
+        { order_id: first[1].id, combined_payment_allocation: "6.67" },
+      ] }]);
+    }
+  });
+
   test("combined receipt allocations remain traceable after one order is cancelled, refunded or paid later", async () => {
     await seed();
     await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
@@ -471,6 +613,11 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     expect((await sql`select amount from payment_group_allocations order by payment_id`).map(row => row.amount)).toEqual(["3.33", "6.67"]);
     expect((await sql`select sum(amount)::text as amount from payment_receipts`)[0].amount).toBe("11.00");
     expect((await sql`select sum(amount)::text as amount from payment_refunds`)[0].amount).toBe("3.33");
+    const { rows } = await PaymentService.getGroupedPayments(0, 10, "BANK-ONE-RECEIPT", "received_at:desc");
+    expect(rows).toMatchObject([{ entry_type: "GROUP", received_amount: "10.00", received_at: receipts[0].received_at, orders: [
+      { order_status: "CANCELLED", amount: "0.00", refunded_amount: "3.33", combined_payment_allocation: "3.33" },
+      { amount: "7.67", combined_payment_allocation: "6.67" },
+    ] }]);
   });
 
   test("combined payments handle full payments, one-cent rounding and rollback before any partial commit", async () => {

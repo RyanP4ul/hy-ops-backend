@@ -19,6 +19,7 @@ import {
   desc,
   eq,
   ilike,
+  inArray,
   isNull,
   ne,
   or,
@@ -27,6 +28,9 @@ import { sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { PaymentUpdate } from "./model";
 import { minorUnitsToMoney, moneyToMinorUnits } from "../../utils/money";
+
+type PaymentReader = Pick<typeof db, "select">;
+const grossReceived = sql<string>`${payments.amount} + ${payments.refunded_amount}`;
 
 export abstract class PaymentService {
   static async getRefunds(paymentNumber: string) {
@@ -61,10 +65,8 @@ export abstract class PaymentService {
   }
 
   static async getPaymentTableRowByNumber(paymentNumber: string) {
-    const result = await this.getPayments(0, 1, paymentNumber, "id:desc");
-    return (
-      result.rows.find((row) => row.payment_number === paymentNumber) ?? null
-    );
+    const rows = await this.paymentRows(db).where(eq(payments.payment_number, paymentNumber));
+    return this.withVerifiedStatuses(rows)[0] ?? null;
   }
 
   static async getPayments(
@@ -74,8 +76,116 @@ export abstract class PaymentService {
     sortBy = "id:desc",
   ) {
     const [sortField, sortOrder] = sortBy.split(":");
+    const searchQuery = this.paymentSearch(search);
+    const [totalResult] = await db
+      .select({ count: count() })
+      .from(payments)
+      .leftJoin(payment_group_allocations, eq(payment_group_allocations.payment_id, payments.id))
+      .leftJoin(payment_groups, eq(payment_groups.id, payment_group_allocations.group_id))
+      .leftJoin(customers, eq(payments.customer_id, customers.id))
+      .leftJoin(users, eq(customers.user_id, users.id))
+      .leftJoin(orders, eq(payments.order_id, orders.id))
+      .where(searchQuery);
+
+    const rows = await this.paymentRows(db)
+      .where(searchQuery)
+      .orderBy(this.sortByField(sortField, sortOrder))
+      .limit(limit)
+      .offset(Math.max(page * limit, 0));
+
+    return { rows: this.withVerifiedStatuses(rows), total: Number(totalResult?.count ?? 0) };
+  }
+
+  static async getGroupedPayments(page = 0, limit = 10, search = "", sortBy = "id:desc") {
+    page = Number.isSafeInteger(page) && page >= 0 ? page : 0;
+    limit = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 100) : 10;
+    const [sortField, sortOrder] = sortBy.split(":");
+    const direction = sortOrder === "asc" ? asc : desc;
+    const entryKey = sql`coalesce(${payment_groups.id}::text, 'payment-' || ${payments.id}::text)`;
+
+    return db.transaction(async (tx) => {
+      const entries = tx.select({
+        payment_id: sql<number>`max(${payments.id})`.mapWith(Number).as("payment_id"),
+        group_id: payment_groups.id,
+        payment_number: sql<string>`coalesce(${payment_groups.payment_number}, max(${payments.payment_number}))`.as("entry_number"),
+        received_amount: sql<string>`coalesce(${payment_groups.amount}, max(${grossReceived}))`.as("received_amount"),
+        received_at: sql<Date | null>`coalesce(${payment_groups.received_at}, max(${payments.received_at}))`.mapWith(payments.received_at).as("entry_received_at"),
+        payment_method: payment_groups.payment_method,
+        payment_type: payment_groups.payment_type,
+        reference_number: payment_groups.reference_number,
+      })
+        .from(payments)
+        .leftJoin(payment_group_allocations, eq(payment_group_allocations.payment_id, payments.id))
+        .leftJoin(payment_groups, eq(payment_groups.id, payment_group_allocations.group_id))
+        .leftJoin(customers, eq(payments.customer_id, customers.id))
+        .leftJoin(users, eq(customers.user_id, users.id))
+        .leftJoin(orders, eq(payments.order_id, orders.id))
+        .where(this.paymentSearch(search))
+        .groupBy(entryKey, payment_groups.id)
+        .as("payment_entries");
+
+      const sortable = {
+        payment_number: entries.payment_number,
+        received_amount: entries.received_amount,
+        received_at: entries.received_at,
+      };
+      const sortColumn = Object.hasOwn(sortable, sortField)
+        ? sortable[sortField as keyof typeof sortable]
+        : entries.payment_id;
+      const [countResult] = await tx.select({ total: count() }).from(entries);
+      const total = countResult?.total ?? 0;
+      const pageEntries = await tx.select().from(entries)
+        .orderBy(sql`${direction(sortColumn)} nulls last`, desc(entries.payment_id))
+        .limit(limit)
+        .offset(page * limit);
+      if (!pageEntries.length) return { rows: [], total };
+
+      const groupIds = pageEntries.flatMap(entry => entry.group_id ? [entry.group_id] : []);
+      const singleIds = pageEntries.filter(entry => !entry.group_id).map(entry => entry.payment_id);
+      const members = this.withVerifiedStatuses(await this.paymentRows(tx)
+        .where(or(inArray(payment_groups.id, groupIds), inArray(payments.id, singleIds)))
+        .orderBy(asc(payments.id)));
+      const paymentsById = new Map(members.map(member => [member.id, member]));
+      const membersByGroup = Map.groupBy(members, member => member.combined_payment_number);
+
+      const rows = pageEntries.map(entry => {
+        const payment = paymentsById.get(entry.payment_id)!;
+        if (!entry.group_id) return { entry_type: "SINGLE" as const, payment };
+        return {
+          entry_type: "GROUP" as const,
+          group_id: entry.group_id,
+          payment_number: entry.payment_number,
+          customer_id: payment.customer_id,
+          customer_name: payment.customer_name,
+          received_amount: entry.received_amount,
+          received_at: entry.received_at,
+          payment_method: entry.payment_method!,
+          payment_type: entry.payment_type,
+          reference_number: entry.reference_number,
+          orders: membersByGroup.get(entry.payment_number)!,
+        };
+      });
+      return { rows, total };
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
+  }
+
+  private static paymentSearch(search: string) {
+    if (!search) return undefined;
+    const match = `%${search}%`;
+    return or(
+      ilike(payments.payment_number, match),
+      ilike(payment_groups.payment_number, match),
+      ilike(payment_groups.reference_number, match),
+      ilike(payments.reference_number, match),
+      ilike(users.name, match),
+      ilike(orders.order_number, match),
+      ilike(sql`${payments.payment_status}::text`, match),
+    );
+  }
+
+  private static paymentRows(reader: PaymentReader) {
     const paymentTotals = alias(payments, "payment_totals");
-    const orderTotals = db
+    const orderTotals = reader
       .select({
         orderId: order_items.order_id,
         total: sql<string | null>`
@@ -90,7 +200,7 @@ export abstract class PaymentService {
       .groupBy(order_items.order_id)
       .as("order_totals");
 
-    const paidTotals = db
+    const paidTotals = reader
       .select({
         orderId: paymentTotals.order_id,
         total: sql<string>`coalesce(sum(${paymentTotals.amount}), 0)`.as(
@@ -100,27 +210,7 @@ export abstract class PaymentService {
       .from(paymentTotals)
       .groupBy(paymentTotals.order_id)
       .as("paid_totals");
-    const searchQuery = search
-      ? or(
-          ilike(payments.payment_number, `%${search}%`),
-          ilike(payment_groups.payment_number, `%${search}%`),
-          ilike(payment_groups.reference_number, `%${search}%`),
-          ilike(payments.reference_number, `%${search}%`),
-          ilike(users.name, `%${search}%`),
-          ilike(sql`${payments.payment_status}::text`, `%${search}%`),
-        )
-      : undefined;
-
-    const [totalResult] = await db
-      .select({ count: count() })
-      .from(payments)
-      .leftJoin(payment_group_allocations, eq(payment_group_allocations.payment_id, payments.id))
-      .leftJoin(payment_groups, eq(payment_groups.id, payment_group_allocations.group_id))
-      .leftJoin(customers, eq(payments.customer_id, customers.id))
-      .leftJoin(users, eq(customers.user_id, users.id))
-      .where(and(searchQuery));
-
-    const rows = await db
+    return reader
       .select({
         id: payments.id,
         payment_number: payments.payment_number,
@@ -129,6 +219,7 @@ export abstract class PaymentService {
         combined_payment_allocation: payment_group_allocations.amount,
         combined_payment_reference: payment_groups.reference_number,
         order_id: payments.order_id,
+        order_number: orders.order_number,
         customer_id: payments.customer_id,
         customer_name: users.name,
         payment_method: payments.payment_method,
@@ -136,7 +227,7 @@ export abstract class PaymentService {
         payment_status: payments.payment_status,
         amount: payments.amount,
         refunded_amount: payments.refunded_amount,
-        gross_received: sql<string>`${payments.amount} + ${payments.refunded_amount}`,
+        gross_received: grossReceived,
         order_status: orders.status,
         remaining_amount: sql<string | null>`case
           when ${orders.status} = 'CANCELLED' then 0
@@ -154,24 +245,14 @@ export abstract class PaymentService {
       .leftJoin(users, eq(customers.user_id, users.id))
       .leftJoin(orderTotals, eq(payments.order_id, orderTotals.orderId))
       .leftJoin(orders, eq(payments.order_id, orders.id))
-      .leftJoin(paidTotals, eq(payments.order_id, paidTotals.orderId))
-      .where(
-        and(
-          searchQuery,
-        ),
-      )
-      .orderBy(this.sortByField(sortField, sortOrder))
-      .limit(limit)
-      .offset(Math.max(page * limit, 0));
+      .leftJoin(paidTotals, eq(payments.order_id, paidTotals.orderId));
+  }
 
-    return {
-      rows: rows.map((row) => ({
-        ...row,
-        payment_status:
-          row.remaining_amount === null ? "UNVERIFIED" : row.payment_status,
-      })),
-      total: Number(totalResult?.count ?? 0),
-    };
+  private static withVerifiedStatuses<Row extends { remaining_amount: string | null; payment_status: string }>(rows: Row[]) {
+    return rows.map(row => ({
+      ...row,
+      payment_status: row.remaining_amount === null ? "UNVERIFIED" as const : row.payment_status,
+    }));
   }
 
   private static sortByField(

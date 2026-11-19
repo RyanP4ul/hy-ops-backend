@@ -1,6 +1,7 @@
 import z from "zod";
 import { RequestBase, Request } from "../request-base";
 import { logger } from "../../../utils/logger";
+import { socketManager } from "../../socket-manager";
 import { TOPIC } from "../../topic";
 
 @Request("SESSION_OUT")
@@ -15,7 +16,8 @@ export class SessionOutHandler extends RequestBase<
       `Session out for user ${this.session.user.email} with socket id: ${this.session.ws.id}`,
     );
 
-    this.publish(
+    socketManager.broadcastToTopic(
+      TOPIC.SESSION_AND_LOGS,
       {
         type: "SESSION_OUT",
         payload: {
@@ -23,15 +25,7 @@ export class SessionOutHandler extends RequestBase<
           session_id: this.session.ws.id,
         },
       },
-      TOPIC.SESSION_AND_LOGS,
+      { excludeSocketId: this.session.ws.id, allowedRoles: ["admin"] },
     );
-
-    // const [meta] = this.data;
-    // await NotificationService.createNotification(
-    //   this.session.user.id,
-    //   "Product Added",
-    //   "Product Desciption Test",
-    //   meta,
-    // );
   }
 }

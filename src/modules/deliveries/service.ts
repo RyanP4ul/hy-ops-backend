@@ -965,8 +965,8 @@ export abstract class DeliveryService {
         })
         .where(eq(deliveries.id, deliveryId));
 
-      await notifyDeliveryStaff(tx, delivery, `Delivery completed: Delivery #${deliveryId}`,
-        `Delivery #${deliveryId} has changed to COMPLETED.`, "DELIVERY_COMPLETED");
+      await notifyDeliveryStaff(tx, delivery, `Delivery #${deliveryId} completed`,
+        `All stops delivered.`, "DELIVERY_COMPLETED");
 
       await tx
         .update(vehicles)

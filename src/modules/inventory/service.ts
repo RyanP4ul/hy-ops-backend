@@ -23,6 +23,7 @@ import {
   ilike,
   inArray,
   lte,
+  notInArray,
   or,
   sql,
 } from "drizzle-orm";
@@ -98,6 +99,7 @@ export abstract class InventoryService {
     from: number | null = null,
     to: number | null = null,
     activeOnly = false,
+    ids?: { include?: number[]; exclude?: number[] },
   ) {
     const is_search_empty = search.length === 0;
     const offset = is_search_empty ? Math.max(page * limit, 0) : 0;
@@ -109,6 +111,7 @@ export abstract class InventoryService {
     const searchQuery = !is_search_empty
       ? or(
           ilike(product_variants.sku, `%${search}%`),
+          ilike(product_variants.name, `%${search}%`),
           ilike(products.name, `%${search}%`),
         )
       : undefined;
@@ -153,6 +156,8 @@ export abstract class InventoryService {
       activeOnly || stock_status !== "all" ? activeInventory() : undefined,
       sql`exists (select 1 from warehouses lifecycle_w where lifecycle_w.id = ${inventory.warehouse_id} and not lifecycle_w.is_archived)`,
       searchQuery,
+      ids?.include ? inArray(inventory.id, ids.include) : undefined,
+      ids?.exclude ? notInArray(inventory.id, ids.exclude) : undefined,
       stockStatusQuery,
       from !== null ? gte(inventory.created_at, from) : undefined,
       to !== null ? lte(inventory.created_at, to) : undefined,
@@ -177,8 +182,15 @@ export abstract class InventoryService {
       .select({
         id: inventory.id,
         product_name: products.name,
+        variant_name: product_variants.name,
         description: product_variants.description,
         sku: product_variants.sku,
+        unit: product_variants.unit,
+        weight_kg: product_variants.weight_kg,
+        width_value: product_variants.width_value,
+        width_unit: product_variants.width_unit,
+        length_value: product_variants.length_value,
+        length_unit: product_variants.length_unit,
         warehouse_name: warehouses.name,
         reserved: inventory.reserved,
         quantity: inventory.quantity,

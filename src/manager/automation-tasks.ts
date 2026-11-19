@@ -174,8 +174,8 @@ async function checkLowStock() {
   for (const { productName, sku, quantity } of lowStockRows) {
     await createNotifications(
       await getRecipientIds(),
-      `Low stock detected for ${productName ?? sku}`,
-      `${productName ?? sku} has a low stock quantity of ${quantity}. Please restock soon.`,
+      `Low stock: ${productName ?? sku}`,
+      `${quantity} left in stock.`,
       "LOW_STOCK",
     );
   }
@@ -265,8 +265,8 @@ async function checkOverduePayments() {
   for (const { orderNumber } of overdueRows) {
     await createNotifications(
       await getRecipientIds(),
-      `Overdue payment detected for order ${orderNumber}`,
-      `Order ${orderNumber} has an overdue payment. Please follow up with the customer.`,
+      `Overdue payment: Order ${orderNumber}`,
+      `Payment is past due.`,
       "OVERDUE_PAYMENT",
     );
   }
@@ -309,8 +309,8 @@ async function checkDeliveryFollowUp() {
   for (const delivery of needsFollowUp) {
     await createNotifications(
       await getRecipientIds(),
-      `Delivery follow-up required for delivery ${delivery.id}`,
-      `Delivery ${delivery.id} is ${delivery.hasIssue ? "marked with a delay or failure event" : "past its scheduled departure time"} and may need staff attention.`,
+      `Delivery #${delivery.id} needs attention`,
+      delivery.hasIssue ? "Delay or failure reported." : "Past scheduled departure.",
       "DELIVERY_FOLLOW_UP",
     );
   }

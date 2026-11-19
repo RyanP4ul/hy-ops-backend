@@ -1,6 +1,7 @@
 import z from "zod";
 import { RequestBase, Request } from "../request-base";
 import { canSubscribe } from "../../authorization";
+import { socketManager } from "../../socket-manager";
 import { TOPIC } from "../../topic";
 
 @Request("CHANGE_PAGE")
@@ -27,7 +28,8 @@ export class ChangePageHandler extends RequestBase<
     this.session.ws.subscribe(this.session.page);
     this.write(JSON.stringify({ type: "WS_SUBSCRIBED", payload: { topic: new_page } }));
 
-    this.publish(
+    socketManager.broadcastToTopic(
+      TOPIC.SESSION_AND_LOGS,
       {
         type: "CHANGE_PAGE",
         payload: {
@@ -35,7 +37,7 @@ export class ChangePageHandler extends RequestBase<
           page: new_page,
         },
       },
-      TOPIC.SESSION_AND_LOGS,
+      { excludeSocketId: this.session.ws.id, allowedRoles: ["admin"] },
     );
   }
 }

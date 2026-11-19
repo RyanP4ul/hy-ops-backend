@@ -78,12 +78,21 @@ export class CreateNotificationHandler extends RequestBase<
       },
     };
     for (const observer of socketManager.getSockets().values()) {
-      if (observer.page !== TOPIC.DASHBOARD && observer.page !== TOPIC.FLEET_MAP) continue;
+      const subscribedToMap =
+        observer.page === TOPIC.DASHBOARD ||
+        observer.page === TOPIC.FLEET_MAP ||
+        observer.ws.isSubscribed(TOPIC.DASHBOARD) ||
+        observer.ws.isSubscribed(TOPIC.FLEET_MAP);
+      if (!subscribedToMap) continue;
       if (observer.user.role !== "admin" && observer.user.role !== "staff") continue;
-      const actor = await UserService.getMutationActor(Number(observer.user.sub));
-      if (!currentSession(observer.user, actor)) continue;
-      if (observer.user.role === "staff" && await staffWarehouse(observer.user) !== profile.warehouse_id) continue;
-      observer.ws.send(JSON.stringify(event));
+      try {
+        const actor = await UserService.getMutationActor(Number(observer.user.sub));
+        if (!currentSession(observer.user, actor)) continue;
+        if (observer.user.role === "staff" && await staffWarehouse(observer.user) !== profile.warehouse_id) continue;
+        observer.ws.send(JSON.stringify(event));
+      } catch {
+        // One unconfigured or closed observer must not block delivery to other subscribers.
+      }
     }
   }
 }

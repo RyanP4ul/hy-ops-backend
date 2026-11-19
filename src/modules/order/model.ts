@@ -54,6 +54,25 @@ export const orderUpdateSchema = t.Object({
 
 export type OrderUpdateType = Static<typeof orderUpdateSchema>;
 
+export const orderEditSchema = t.Object({
+  version: t.Integer({ minimum: 1 }),
+  notes: t.Optional(t.String({ maxLength: 2000 })),
+  delivery_type: t.Optional(
+    t.Union([t.Literal("INTERNAL"), t.Literal("LALAMOVE"), t.Literal("PICKUP")]),
+  ),
+  customer_address_id: t.Optional(t.Numeric({ minimum: 1 })),
+  payment_arrangement: t.Optional(
+    t.Union([
+      t.Literal("FULLY_PAID"),
+      t.Literal("PARTIALLY_PAID"),
+      t.Literal("NET_30"),
+    ]),
+  ),
+  items: t.Optional(t.Array(orderItemSchema, { minItems: 1 })),
+});
+
+export type OrderEditInput = Static<typeof orderEditSchema>;
+
 export const orderItemUpdateSchema = t.Object({
   quantity: t.Integer({ minimum: 1 }),
 });

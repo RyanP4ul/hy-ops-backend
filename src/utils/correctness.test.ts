@@ -5,6 +5,9 @@ import { auditTarget, redactAuditPayload } from "./audit";
 import { canSendRequest, canSubscribe } from "../ws/authorization";
 import { allowedOrigin, currentSession, mayAccess } from "../modules/auth/policy";
 import { watchSession } from "../ws/session-watch";
+import { SocketManager } from "../ws/socket-manager";
+import { TOPIC } from "../ws/topic";
+import { parseUserAgent } from "./headers";
 
 test("centavo calculations are exact and reject malformed amounts", () => {
   expect(moneyToMinorUnits("12.34") * 3n - moneyToMinorUnits(5)).toBe(3202n);
@@ -73,4 +76,56 @@ test("idle sockets close after revocation, expiry, or a failed account lookup", 
   expect(expired).toBe(4002);
   const unavailable = await new Promise<number>((resolve) => watchSession(Date.now() / 1000 + 60, async () => { throw new Error("fixture"); }, (code) => resolve(code), 5));
   expect(unavailable).toBe(4003);
+});
+
+test("mobile sessions register on mobile page and session-and-logs broadcasts reach subscribed admins", () => {
+  const manager = new SocketManager();
+  const adminMessages: string[] = [];
+  const staffMessages: string[] = [];
+  const driverMessages: string[] = [];
+
+  const makeWs = (id: string, topics: string[], sink: string[]) => ({
+    id,
+    isSubscribed: (topic: string) => topics.includes(topic),
+    send: (data: string) => sink.push(data),
+  });
+  const baseUser = {
+    email: "u@example.test",
+    name: "User",
+    token_version: 1,
+    user_agent: parseUserAgent("HYOps-Driver/1.0 (Android; Flutter)"),
+    iat: 1,
+    exp: 9999999999,
+    token_type: "access",
+  };
+
+  manager.addSocket(makeWs("admin-1", [TOPIC.SESSION_AND_LOGS], adminMessages), "127.0.0.1", { ...baseUser, sub: 1, role: "admin" });
+  manager.getSocket("admin-1")!.page = TOPIC.SESSION_AND_LOGS;
+  manager.addSocket(makeWs("staff-1", [TOPIC.SESSION_AND_LOGS], staffMessages), "127.0.0.1", { ...baseUser, sub: 2, role: "staff" });
+  manager.addSocket(makeWs("driver-1", [], driverMessages), "127.0.0.1", { ...baseUser, sub: 3, role: "driver" });
+
+  expect(manager.getSocket("driver-1")?.page).toBe("mobile");
+  expect(manager.getSocket("staff-1")?.page).toBe("dashboard");
+
+  manager.broadcastToTopic(
+    TOPIC.SESSION_AND_LOGS,
+    { type: "NEW_SESSION", payload: { id: "driver-1", page: "mobile" } },
+    { excludeSocketId: "driver-1", allowedRoles: ["admin"] },
+  );
+
+  expect(adminMessages).toHaveLength(1);
+  expect(JSON.parse(adminMessages[0])).toMatchObject({ type: "NEW_SESSION", payload: { id: "driver-1", page: "mobile" } });
+  expect(staffMessages).toHaveLength(0);
+  expect(driverMessages).toHaveLength(0);
+
+  expect(parseUserAgent("HYOps-Driver/1.0 (Android; Flutter)")).toMatchObject({
+    browser: { name: "HYOps Mobile App" },
+    os: { name: "Android" },
+    device: { type: "mobile" },
+  });
+  expect(parseUserAgent("HYOps-Driver/1.0 (iOS; Flutter)")).toMatchObject({
+    browser: { name: "HYOps Mobile App" },
+    os: { name: "iOS" },
+    device: { type: "mobile" },
+  });
 });

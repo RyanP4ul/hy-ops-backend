@@ -13,12 +13,13 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
   }, {
       detail: { summary: 'Create refunds', description: 'POST endpoint for refunds in the payments module.', tags: ['Payments'] }, body: t.Object({ payment_number: t.String(), amount: t.Number({ exclusiveMinimum: 0 }), version: t.Integer({ minimum: 1 }), reason: t.String({ minLength: 1, maxLength: 500 }), request_id: t.String({ format: "uuid" }) }) })
   .get("/", async ({ query, set }) => {
-    const result = await PaymentService.getPayments(
-      query.page ? Number(query.page) : 0,
-      query.limit ? Number(query.limit) : 10,
-      query.search?.trim() ?? "",
-      query.sort_by ?? "id:desc",
-    );
+    const page = query.page ? Number(query.page) : 0;
+    const limit = query.limit ? Number(query.limit) : 10;
+    const search = query.search?.trim() ?? "";
+    const sortBy = query.sort_by ?? "id:desc";
+    const result = query.grouped === "true"
+      ? await PaymentService.getGroupedPayments(page, limit, search, sortBy)
+      : await PaymentService.getPayments(page, limit, search, sortBy);
     set.headers["X-Total-Count"] = result.total;
     return result.rows;
   }, { detail: { summary: 'List root', description: 'GET endpoint for root in the payments module.', tags: ['Payments'] } })

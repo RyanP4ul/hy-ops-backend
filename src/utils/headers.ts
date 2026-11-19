@@ -33,6 +33,8 @@ export function parseUserAgent(
 
     const match = ua.match(/iPhone OS ([\d_]+)/i);
     osVersion = match?.[1]?.replace(/_/g, ".") ?? "";
+  } else if (/\biOS\b/i.test(ua)) {
+    osName = "iOS";
   } else if (/Mac OS X ([\d_]+)/i.test(ua)) {
     osName = "macOS";
 

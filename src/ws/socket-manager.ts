@@ -27,7 +27,7 @@ export class SocketManager {
     this.sockets.set(ws.id, {
       ws: ws,
       user,
-      page: "dashboard",
+      page: user.role === "driver" ? "mobile" : "dashboard",
       ip_address,
       started_at: Date.now(),
     });
@@ -35,6 +35,32 @@ export class SocketManager {
 
   public removeSocket(id: string) {
     this.sockets.delete(id);
+  }
+
+  public broadcastToTopic(
+    topic: string,
+    event: unknown,
+    options?: { excludeSocketId?: string; allowedRoles?: readonly string[] },
+  ) {
+    const serialized =
+      typeof event === "string" ? event : JSON.stringify(event);
+
+    for (const session of this.sockets.values()) {
+      if (options?.excludeSocketId && session.ws.id === options.excludeSocketId)
+        continue;
+      if (
+        options?.allowedRoles &&
+        !options.allowedRoles.includes(String(session.user.role))
+      )
+        continue;
+      if (session.page !== topic && !session.ws.isSubscribed(topic)) continue;
+
+      try {
+        session.ws.send(serialized);
+      } catch {
+        // Ignore sockets that are already closing.
+      }
+    }
   }
 }
 

@@ -12,6 +12,7 @@ import { requestManager } from "./requests/request-manager";
 import { TOPIC } from "./topic";
 import { sessionService } from "../modules/session/service";
 const sessionWatches = new Map<string, () => void>();
+const pendingOpens = new Map<string, Promise<void>>();
 
 export const ws = new Elysia()
   .decorate("user", AuthUser)
@@ -24,51 +25,66 @@ export const ws = new Elysia()
     }),
 
     async open(ws) {
-      const user_agent = parseUserAgent(ws.data.headers["user-agent"] || null);
-      const ip_address = String(ws.data.ip_address) || "unknown";
-	  
-      const user: AuthUser = {
-        sub: ws.data.user.sub,
-        email: ws.data.user.email,
-        name: ws.data.user.name,
-        role: ws.data.user.role,
-        token_version: ws.data.user.token_version,
-        user_agent: user_agent,
-        iat: ws.data.user.iat,
-        exp: ws.data.user.exp,
-        token_type: ws.data.user.token_type,
-      };
+      const setup = (async () => {
+        const user_agent = parseUserAgent(ws.data.headers["user-agent"] || null);
+        const ip_address = String(ws.data.ip_address) || "unknown";
 
-      // Account changes can commit between the HTTP upgrade guard and this callback.
-      try {
-        if (!currentSession(user, await UserService.getMutationActor(Number(user.sub)))) {
-          ws.close(4001, "Session revoked"); return;
+        const user: AuthUser = {
+          sub: ws.data.user.sub,
+          email: ws.data.user.email,
+          name: ws.data.user.name,
+          role: ws.data.user.role,
+          token_version: ws.data.user.token_version,
+          user_agent: user_agent,
+          iat: ws.data.user.iat,
+          exp: ws.data.user.exp,
+          token_type: ws.data.user.token_type,
+        };
+
+        // Account changes can commit between the HTTP upgrade guard and this callback.
+        try {
+          if (!currentSession(user, await UserService.getMutationActor(Number(user.sub)))) {
+            ws.close(4001, "Session revoked"); return;
+          }
+        } catch {
+          ws.close(4003, "Unable to verify session"); return;
         }
-      } catch {
-        ws.close(4003, "Unable to verify session"); return;
+        socketManager.addSocket(ws, ip_address, user);
+        const unwatch = watchSession(user.exp, async () =>
+          currentSession(user, await UserService.getMutationActor(Number(user.sub))),
+          (code, reason) => ws.close(code, reason));
+        const unsubscribe = onSessionRevoked(Number(user.sub), () => ws.close(4001, "Session revoked"));
+        sessionWatches.set(ws.id, () => { unwatch(); unsubscribe(); });
+
+        if (["admin", "staff"].includes(String(user.role))) ws.subscribe(TOPIC.GLOBAL);
+
+        ws.send(JSON.stringify({ type: "WS_READY", payload: null }));
+
+        const session = socketManager.getSocket(ws.id);
+        socketManager.broadcastToTopic(
+          TOPIC.SESSION_AND_LOGS,
+          {
+            type: "NEW_SESSION",
+            payload: {
+              id: ws.id,
+              ip_address: ip_address,
+              page: session?.page ?? (user.role === "driver" ? "mobile" : "dashboard"),
+              user: user,
+            },
+          },
+          { excludeSocketId: ws.id, allowedRoles: ["admin"] },
+        );
+      })();
+
+      pendingOpens.set(ws.id, setup);
+      try {
+        await setup;
+      } finally {
+        if (pendingOpens.get(ws.id) === setup) pendingOpens.delete(ws.id);
       }
-      socketManager.addSocket(ws, ip_address, user);
-      const unwatch = watchSession(user.exp, async () =>
-        currentSession(user, await UserService.getMutationActor(Number(user.sub))),
-        (code, reason) => ws.close(code, reason));
-      const unsubscribe = onSessionRevoked(Number(user.sub), () => ws.close(4001, "Session revoked"));
-      sessionWatches.set(ws.id, () => { unwatch(); unsubscribe(); });
-
-      if (["admin", "staff"].includes(String(user.role))) ws.subscribe(TOPIC.GLOBAL);
-
-      ws.send(JSON.stringify({ type: "WS_READY", payload: null }));
-
-      ws.publish(TOPIC.SESSION_AND_LOGS, {
-        type: "NEW_SESSION",
-        payload: {
-          id: ws.id,
-          ip_address: ip_address,
-          page: "unknown",
-          user: user,
-        },
-      });
     },
     async message(ws, message) {
+      await pendingOpens.get(ws.id);
       const session = socketManager.getSocket(ws.id);
 
       if (!session) {
@@ -102,23 +118,27 @@ export const ws = new Elysia()
 		if (message.type !== "CHANGE_PAGE") {
 			const log = await sessionService.createWsLogs({
 			  session_id: ws.id,
-			  user_id: session.user.sub,
+			  user_id: Number(session.user.sub),
 			  action: data.type,
 			  payload: JSON.stringify(message.payload),
 			  created_at: Math.floor(Date.now() / 1000),
 			  updated_at: Math.floor(Date.now() / 1000),
 			});
 
-			ws.publish(TOPIC.SESSION_AND_LOGS, {
-			  type: "WS_LOG_CREATED",
-			  payload: {
-				ws_id: log.id,
-				session_id: ws.id,
-				user_id: session.user.sub,
-				action: data.type,
-				payload: JSON.stringify(message.payload),
+			socketManager.broadcastToTopic(
+			  TOPIC.SESSION_AND_LOGS,
+			  {
+			    type: "WS_LOG_CREATED",
+			    payload: {
+			      ws_id: log.id,
+			      session_id: ws.id,
+			      user_id: Number(session.user.sub),
+			      action: data.type,
+			      payload: JSON.stringify(message.payload),
+			    },
 			  },
-			});
+			  { allowedRoles: ["admin"] },
+			);
 		}
 
         // Domain changes are published by successful HTTP mutations. Never trust
@@ -133,17 +153,17 @@ export const ws = new Elysia()
         ws.close(4003, "Unable to verify request");
       }
     },
-    close(ws) {
+    async close(ws) {
+      await pendingOpens.get(ws.id);
       sessionWatches.get(ws.id)?.();
       sessionWatches.delete(ws.id);
       logger.info(`WebSocket connection closed with code: ${ws.id}`);
 
       const session = socketManager.getSocket(ws.id);
+      socketManager.removeSocket(ws.id);
 
       if (session !== undefined) {
-        requestManager.handleRequest(session, "SESSION_OUT", [ws.id]);
+        await requestManager.handleRequest(session, "SESSION_OUT", [ws.id]);
       }
-
-      socketManager.removeSocket(ws.id);
     },
   });

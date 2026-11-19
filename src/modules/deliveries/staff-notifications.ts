@@ -49,8 +49,8 @@ export async function checkStoppedDeliveryLocations() {
     for (const delivery of stale) {
       const count = delivery.location_alert_count + 1;
       await notifyDeliveryStaff(tx, delivery,
-        `Location updates stopped: Delivery #${delivery.id} (alert ${count})`,
-        `The server has not received GPS coordinates from the driver for delivery #${delivery.id} for at least two minutes while it is IN_TRANSIT. Check the driver's device and connection.`,
+        `GPS lost: Delivery #${delivery.id}${count > 1 ? ` (${count})` : ""}`,
+        `No location update for 2+ min. Check driver connection.`,
         "DELIVERY_LOCATION_STOPPED");
       await tx.update(deliveries).set({ location_alerted_at: new Date(), location_alert_count: count })
         .where(eq(deliveries.id, delivery.id));

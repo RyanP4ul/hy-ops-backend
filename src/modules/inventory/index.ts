@@ -5,6 +5,10 @@ import { AuthUser } from "../auth/schema";
 import { previewReconciliation, reconcileReservations } from "./reconciliation";
 import { staffWarehouse } from "../deliveries/scope";
 
+function parseInventoryIds(value: string | undefined) {
+  return value?.split(",").map(Number).filter(id => Number.isInteger(id) && id > 0 && id <= 2_147_483_647);
+}
+
 export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
   .decorate("user", {} as AuthUser)
   .use(inventoryModel)
@@ -47,6 +51,7 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
       from,
       to,
       query.active_only === "true",
+      { include: parseInventoryIds(query.ids), exclude: parseInventoryIds(query.exclude_ids) },
     );
 
     set.headers["X-Total-Count"] = inventory.total;

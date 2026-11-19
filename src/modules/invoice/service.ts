@@ -6,6 +6,7 @@ import { order_items, orders } from "@/db/schema/order";
 import { product_variants, products } from "@/db/schema/products";
 import { payments } from "@/db/schema/payment";
 import { customers, users } from "@/db/schema/users";
+import { warehouses } from "@/db/schema/warehouses";
 import { eq, sql } from "drizzle-orm";
 import { minorUnitsToMoney, moneyToMinorUnits } from "../../utils/money";
 
@@ -16,6 +17,8 @@ export abstract class InvoiceService {
         id: invoices.id,
         invoice_number: invoices.invoice_number,
         order_id: invoices.order_id,
+        order_number: orders.order_number,
+        warehouse_name: warehouses.name,
         customer_id: invoices.customer_id,
         status: invoices.status,
         issue_date: invoices.issue_date,
@@ -36,6 +39,7 @@ export abstract class InvoiceService {
       })
       .from(invoices)
       .leftJoin(orders, eq(invoices.order_id, orders.id))
+      .leftJoin(warehouses, eq(orders.warehouse_id, warehouses.id))
       .leftJoin(customers, eq(invoices.customer_id, customers.id))
       .leftJoin(users, eq(customers.user_id, users.id))
       .leftJoin(invoice_payments, eq(invoices.id, invoice_payments.invoice_id))
@@ -51,6 +55,7 @@ export abstract class InvoiceService {
         id: order_items.id,
         name: products.name,
         variant_name: product_variants.name,
+        sku: product_variants.sku,
         description: product_variants.description,
         quantity: order_items.quantity,
         unit_price: order_items.unit_price_snapshot,
@@ -100,9 +105,23 @@ export abstract class InvoiceService {
     }
 
     const isWalkIn = invoice.sales_channel === "WALK_IN";
+    const normalizedCompany =
+      invoice.company_name &&
+      invoice.company_name.trim() !== "" &&
+      invoice.company_name.trim().toLowerCase() !== "none"
+        ? invoice.company_name.trim()
+        : undefined;
+    const rawPhone =
+      isWalkIn && invoice.shipping_phone?.trim()
+        ? invoice.shipping_phone.trim()
+        : invoice.phone_number?.trim();
+    const normalizedPhone =
+      rawPhone && rawPhone.toUpperCase() !== "N/A" ? rawPhone : undefined;
 
     return {
       invoice_number: invoice.invoice_number,
+      order_number: invoice.order_number ?? undefined,
+      warehouse_name: invoice.warehouse_name ?? undefined,
       status: invoice.status,
       issue_date: issueDate.toISOString().slice(0, 10),
       due_date: dueDate.toISOString().slice(0, 10),
@@ -119,18 +138,23 @@ export abstract class InvoiceService {
           isWalkIn && invoice.shipping_recipient?.trim()
             ? invoice.shipping_recipient.trim()
             : invoice.customer_name,
-        company_name: isWalkIn && invoice.customer_email === null ? undefined : invoice.company_name,
+        company_name:
+          isWalkIn && invoice.customer_email === null
+            ? undefined
+            : normalizedCompany,
         address: invoice.full_address,
-        email: invoice.customer_email,
-        phone:
-          isWalkIn && invoice.shipping_phone?.trim()
-            ? invoice.shipping_phone.trim()
-            : invoice.phone_number,
+        email: invoice.customer_email ?? undefined,
+        phone: normalizedPhone,
       },
       items: items.map((item) => ({
         id: item.id,
         name: item.name ?? item.variant_name ?? "Item",
-        description: item.description ?? item.variant_name ?? undefined,
+        variant_name:
+          item.variant_name && item.variant_name !== item.name
+            ? item.variant_name
+            : undefined,
+        sku: item.sku ?? undefined,
+        description: item.description?.trim() || undefined,
         quantity: item.quantity,
         unit_price:
           item.unit_price === null ? null : Number(item.unit_price),
@@ -138,7 +162,7 @@ export abstract class InvoiceService {
       discount: 0,
       tax: 0,
       other_charges: 0,
-      notes: invoice.order_notes ?? undefined,
+      notes: invoice.order_notes?.trim() || undefined,
     };
   }
 

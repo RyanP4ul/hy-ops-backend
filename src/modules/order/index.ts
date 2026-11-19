@@ -1,5 +1,5 @@
 import Elysia, { t } from "elysia";
-import { orderModel, savedShippingAddressSchema } from "./model";
+import { orderEditSchema, orderModel, savedShippingAddressSchema } from "./model";
 import { OrderService } from "./service";
 import { AuthUser } from "../auth/schema";
 import { staffWarehouse, assertOrderScope, assignOrderWarehouse } from "../deliveries/scope";
@@ -10,6 +10,11 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   .decorate("user", {} as AuthUser)
   .use(orderModel)
   .get("/:id/lalamove", ({ params, user }) => LalamoveService.context(params.id, user), { params: t.Object({ id: t.Numeric({ minimum: 1 }) }) })
+  .get("/customers/:customerId/addresses", ({ params }) =>
+    OrderService.getCustomerAddresses(params.customerId), {
+      detail: { summary: 'List customer saved shipping addresses', description: 'GET endpoint for customer saved shipping addresses in the orders module.', tags: ['Orders'] },
+    params: t.Object({ customerId: t.Numeric({ minimum: 1 }) }),
+  })
   .post("/customers/:customerId/addresses", ({ params, body }) =>
     OrderService.saveShippingAddress(params.customerId, body), {
       detail: { summary: 'Create customers by customerId addresses', description: 'POST endpoint for customers by customerId addresses in the orders module.', tags: ['Orders'] },
@@ -22,16 +27,28 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     const search = query.search ? query.search.trim() : "";
     const delivery_type = query.delivery_type ? query.delivery_type.trim() : "";
     const sort_by = query.sort_by ? String(query.sort_by) : "id:desc";
+    const grouped = query.grouped === "true";
+    const warehouseId = await staffWarehouse(user);
 
-    const result = await OrderService.getOrders(
-      page,
-      limit,
-      search,
-      delivery_type,
-      sort_by,
-      query.status ?? "",
-      await staffWarehouse(user),
-    );
+    const result = grouped
+      ? await OrderService.getGroupedOrders(
+          page,
+          limit,
+          search,
+          delivery_type,
+          sort_by,
+          query.status ?? "",
+          warehouseId,
+        )
+      : await OrderService.getOrders(
+          page,
+          limit,
+          search,
+          delivery_type,
+          sort_by,
+          query.status ?? "",
+          warehouseId,
+        );
 
     set.headers["X-Total-Count"] = result.total;
 
@@ -40,8 +57,9 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   .get(
     "/:id",
     async ({ params, user }) => {
-      await assertOrderScope(params.id, await staffWarehouse(user));
-      const orderDetail = await OrderService.getOrderById(params.id);
+      const warehouseId = await staffWarehouse(user);
+      await assertOrderScope(params.id, warehouseId);
+      const orderDetail = await OrderService.getOrderById(params.id, warehouseId);
 
       if (!orderDetail) {
         throw new WorkflowError("Order not found.", 404);
@@ -61,6 +79,18 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     return OrderService.getReadyOrderGroup(params.groupId, assigned.warehouse_id);
   }, {
       detail: { summary: 'Get groups by groupId ready', description: 'GET endpoint for groups by groupId ready in the orders module.', tags: ['Orders'] }, params: t.Object({ groupId: t.String({ format: "uuid" }) }), query: t.Object({ warehouse_id: t.Optional(t.Numeric({ minimum: 1 })) }) })
+  .post("/groups/:groupId/process", async ({ params, user }) => {
+    return OrderService.processOrderGroup(params.groupId, await staffWarehouse(user));
+  }, {
+    detail: { summary: 'Process all pending orders in a group', description: 'Transitions all pending non-walk-in orders in the order group to PROCESSING.', tags: ['Orders'] },
+    params: t.Object({ groupId: t.String({ format: "uuid" }) }),
+  })
+  .post("/groups/:groupId/delivery", async ({ params, user }) => {
+    return OrderService.deliveryOrderGroup(params.groupId, await staffWarehouse(user));
+  }, {
+    detail: { summary: 'Mark all processing orders in a group ready for delivery', description: 'Transitions all processing non-walk-in orders in the order group to SCHEDULING and issues invoices.', tags: ['Orders'] },
+    params: t.Object({ groupId: t.String({ format: "uuid" }) }),
+  })
   .get("/details", async ({ query, user }) => {
     const order_ids = query.ids ? query.ids.split(",").map(Number) : [];
     return await OrderService.getOrderDetailsByIds(order_ids, await staffWarehouse(user));
@@ -76,10 +106,11 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   )
   .put("/:id", async ({ params, body, user }) => {
     await assertOrderScope(params.id, await staffWarehouse(user));
-    return OrderService.updateNotes(params.id, body.version, body.notes);
+    return OrderService.updateOrder(params.id, body);
   }, {
-      detail: { summary: 'Update by id', description: 'PUT endpoint for by id in the orders module.', tags: ['Orders'] },
-    params: t.Object({ id: t.Numeric({ minimum: 1 }) }), body: t.Object({ version: t.Integer({ minimum: 1 }), notes: t.String({ maxLength: 2000 }) }),
+      detail: { summary: 'Update by id', description: 'PUT endpoint for updating a pending or processing order in the orders module.', tags: ['Orders'] },
+    params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+    body: orderEditSchema,
   })
   .put("/:id/destination", async ({ params, body, user }) => { await assertOrderScope(params.id, await staffWarehouse(user)); return OrderService.setDestination(params.id, body.version, body.latitude, body.longitude); }, {
       detail: { summary: 'Update by id destination', description: 'PUT endpoint for by id destination in the orders module.', tags: ['Orders'] },
