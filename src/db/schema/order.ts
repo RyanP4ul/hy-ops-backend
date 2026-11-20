@@ -4,7 +4,6 @@ import { inventory } from "./inventory";
 import { products } from "./products";
 import { customers, users } from "./users";
 import {
-  type AnyPgColumn,
   boolean,
   integer,
   pgTable,
@@ -86,21 +85,12 @@ export const orders = pgTable("orders", {
   shipping_address_source_id: integer("shipping_address_source_id"),
   tracking_token: uuid("tracking_token").defaultRandom().unique(),
 
-  staging_bay: varchar("staging_bay", { length: 64 }),
-  staged_at: timestamp("staged_at", { withTimezone: true }),
-  staged_by: integer("staged_by").references(() => users.id, { onDelete: "restrict" }),
-
-  parent_order_id: integer("parent_order_id").references((): AnyPgColumn => orders.id, { onDelete: "restrict" }),
-  split_sequence: integer("split_sequence"),
-  split_reason: text("split_reason"),
-
   version: integer("version").notNull().default(1),
 
   created_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
   updated_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("orders_group_index").on(table.order_group_id),
-  index("orders_parent_order_idx").on(table.parent_order_id),
   check("orders_sales_channel_valid", sql`${table.sales_channel} in ('STANDARD', 'WALK_IN')`),
   check("orders_delivery_method_valid", sql`${table.delivery_method} in ('INTERNAL', 'LALAMOVE', 'PICKUP', 'WALK_IN')`),
   unique("orders_group_position_unique").on(table.order_group_id, table.order_group_position),
@@ -123,8 +113,6 @@ export const order_items = pgTable(
         onUpdate: "cascade",
       }),
     quantity: integer("quantity").notNull(),
-    picked_qty: integer("picked_qty").notNull().default(0),
-    packed_qty: integer("packed_qty").notNull().default(0),
     unit_price_snapshot: numeric("unit_price_snapshot", {
       precision: 10,
       scale: 2,
@@ -143,8 +131,6 @@ export const order_items = pgTable(
     index("order_id_index").on(table.order_id),
     index("inventory_id_index").on(table.inventory_id),
     check("quantity_check", sql`quantity > 0`),
-    check("order_items_picked_qty_valid", sql`${table.picked_qty} >= 0 AND ${table.picked_qty} <= ${table.quantity}`),
-    check("order_items_packed_qty_valid", sql`${table.packed_qty} >= 0 AND ${table.packed_qty} <= ${table.picked_qty}`),
   ],
 );
 

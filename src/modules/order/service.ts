@@ -806,12 +806,6 @@ export abstract class OrderService {
         customer_phone: sql<string | null>`nullif(nullif(trim(${customers.phone_number}), ''), 'N/A')`,
         status: orders.status,
         tracking_token: orders.tracking_token,
-        staging_bay: orders.staging_bay,
-        staged_at: orders.staged_at,
-        staged_by: orders.staged_by,
-        parent_order_id: orders.parent_order_id,
-        split_sequence: orders.split_sequence,
-        split_reason: orders.split_reason,
         notes: orders.notes,
         version: orders.version,
         created_at: orders.created_at,
@@ -825,7 +819,7 @@ export abstract class OrderService {
 
     if (!order_row) return null;
 
-    const [order_item, [deliveryRow], combined_payment, groupMembers, splitChildren, parentRow] = await Promise.all([
+    const [order_item, [deliveryRow], combined_payment, groupMembers] = await Promise.all([
       db
         .select({
           id: order_items.id,
@@ -836,10 +830,6 @@ export abstract class OrderService {
           product_variant_sku: product_variants.sku,
           description: product_variants.description,
           quantity: order_items.quantity,
-          picked_qty: order_items.picked_qty,
-          packed_qty: order_items.packed_qty,
-          weight_kg: product_variants.weight_kg,
-          unit: product_variants.unit,
           price: order_items.unit_price_snapshot,
         })
         .from(order_items)
@@ -849,8 +839,7 @@ export abstract class OrderService {
           product_variants,
           eq(inventory.product_variant_id, product_variants.id),
         )
-        .where(eq(order_items.order_id, orderId))
-        .orderBy(asc(order_items.id)),
+        .where(eq(order_items.order_id, orderId)),
       db
         .select({
           delivery_id: deliveries.id,
@@ -901,31 +890,10 @@ export abstract class OrderService {
             )
             .orderBy(asc(orders.order_group_position), asc(orders.id))
         : Promise.resolve([]),
-      db
-        .select({
-          id: orders.id,
-          order_number: orders.order_number,
-          status: orders.status,
-          split_sequence: orders.split_sequence,
-          split_reason: orders.split_reason,
-          total_quantity: sql<number>`coalesce((select sum(${order_items.quantity}) from ${order_items} where ${order_items.order_id} = ${orders.id}), 0)`.mapWith(Number),
-        })
-        .from(orders)
-        .where(eq(orders.parent_order_id, orderId))
-        .orderBy(asc(orders.split_sequence), asc(orders.id)),
-      order_row.parent_order_id
-        ? db
-            .select({ id: orders.id, order_number: orders.order_number })
-            .from(orders)
-            .where(eq(orders.id, order_row.parent_order_id))
-            .limit(1)
-        : Promise.resolve([]),
     ]);
 
     return {
       ...order_row,
-      parent_order_number: parentRow[0]?.order_number ?? null,
-      split_children: splitChildren,
       walk_in_amount_tendered:
         order_row.walk_in_amount_tendered === null
           ? null
@@ -939,7 +907,6 @@ export abstract class OrderService {
       is_custom_shipping: order_row.customer_address_id === null,
       items: order_item.map((item) => ({
         ...item,
-        weight_kg: item.weight_kg === null ? null : Number(item.weight_kg),
         price: item.price === null ? null : Number(item.price),
       })),
     };
@@ -1444,401 +1411,7 @@ export abstract class OrderService {
     });
   }
 
-  static async updatePickPackStage(
-    orderId: number,
-    actorId: number,
-    input: {
-      version: number;
-      staging_bay?: string | null;
-      advance_to_scheduling?: boolean;
-      items: Array<{ order_item_id: number; picked_qty: number; packed_qty: number }>;
-    },
-  ) {
-    return await stockTransaction(async (tx) => {
-      const [order] = await tx
-        .select()
-        .from(orders)
-        .where(and(eq(orders.id, orderId), eq(orders.version, input.version)))
-        .for("update");
-
-      if (!order) {
-        throw new WorkflowError("Order not found or has been modified. Please refresh and try again.", 409);
-      }
-
-      await assertOperationalOrder(tx, orderId);
-
-      if (order.delivery_method === "WALK_IN") {
-        throw new WorkflowError("Walk-in orders do not use the Pick/Pack staging checklist.", 400);
-      }
-
-      if (order.status !== "PROCESSING") {
-        throw new WorkflowError("Pick, Pack & Stage verification is only available for PROCESSING orders.", 409);
-      }
-
-      const existingItems = await tx
-        .select()
-        .from(order_items)
-        .where(eq(order_items.order_id, orderId))
-        .orderBy(asc(order_items.id))
-        .for("update");
-
-      if (!existingItems.length) {
-        throw new WorkflowError("Order has no line items.", 400);
-      }
-
-      const byId = new Map(existingItems.map((item) => [item.id, item]));
-      const nextState = new Map(
-        existingItems.map((item) => [
-          item.id,
-          { quantity: item.quantity, picked_qty: item.picked_qty, packed_qty: item.packed_qty },
-        ]),
-      );
-
-      for (const patch of input.items) {
-        const target = byId.get(patch.order_item_id);
-        if (!target) {
-          throw new WorkflowError(`Order item #${patch.order_item_id} does not belong to this order.`, 400);
-        }
-        if (
-          !Number.isInteger(patch.picked_qty) ||
-          !Number.isInteger(patch.packed_qty) ||
-          patch.picked_qty < 0 ||
-          patch.picked_qty > target.quantity ||
-          patch.packed_qty < 0 ||
-          patch.packed_qty > patch.picked_qty
-        ) {
-          throw new WorkflowError(
-            `Invalid picked/packed quantities for item #${patch.order_item_id} (required: ${target.quantity}).`,
-            400,
-          );
-        }
-        nextState.set(target.id, {
-          quantity: target.quantity,
-          picked_qty: patch.picked_qty,
-          packed_qty: patch.packed_qty,
-        });
-        await tx
-          .update(order_items)
-          .set({ picked_qty: patch.picked_qty, packed_qty: patch.packed_qty })
-          .where(eq(order_items.id, target.id));
-      }
-
-      const allStaged = [...nextState.values()].every(
-        (item) => item.picked_qty === item.quantity && item.packed_qty === item.quantity,
-      );
-
-      if (input.advance_to_scheduling && !allStaged) {
-        throw new WorkflowError(
-          "Every line item must be fully picked and packed before moving this order to Scheduling.",
-          409,
-        );
-      }
-
-      const now = new Date();
-      const stagingBay = input.staging_bay !== undefined ? (input.staging_bay?.trim() || null) : order.staging_bay;
-      const nextStatus = input.advance_to_scheduling ? "SCHEDULING" : order.status;
-
-      await tx
-        .update(orders)
-        .set({
-          staging_bay: stagingBay,
-          staged_at: allStaged ? now : null,
-          staged_by: allStaged ? actorId : null,
-          status: nextStatus,
-          version: order.version + 1,
-          updated_at: now,
-        })
-        .where(eq(orders.id, orderId));
-
-      if (input.advance_to_scheduling) {
-        await tx
-          .update(invoices)
-          .set({ status: "ISSUED", issue_date: now })
-          .where(eq(invoices.order_id, orderId));
-      }
-
-      return {
-        id: orderId,
-        staged: allStaged,
-        status: nextStatus,
-        staging_bay: stagingBay,
-        message: input.advance_to_scheduling
-          ? `Order ${order.order_number} verified as staged and moved to Scheduling.`
-          : allStaged
-            ? `Order ${order.order_number} is fully picked, packed, and staged.`
-            : `Pick & pack progress saved for order ${order.order_number}.`,
-      };
-    });
-  }
-
-  static async splitOrder(
-    orderId: number,
-    actorId: number,
-    input: {
-      version: number;
-      reason?: string | null;
-      items: Array<{ order_item_id: number; split_quantity: number }>;
-    },
-  ) {
-    return await stockTransaction(async (tx) => {
-      const [parent] = await tx
-        .select()
-        .from(orders)
-        .where(and(eq(orders.id, orderId), eq(orders.version, input.version)))
-        .for("update");
-
-      if (!parent) {
-        throw new WorkflowError("Order not found or has been modified. Please refresh and try again.", 409);
-      }
-
-      await assertOperationalOrder(tx, orderId);
-
-      if (parent.delivery_method === "WALK_IN") {
-        throw new WorkflowError("Walk-in orders cannot be split for delivery.", 400);
-      }
-      if (!["PENDING", "PROCESSING", "SCHEDULING"].includes(parent.status)) {
-        throw new WorkflowError("Only PENDING, PROCESSING, or SCHEDULING orders can be split.", 409);
-      }
-
-      await assertNoExternalClaim(tx, orderId);
-
-      const [activeStop] = await tx
-        .select({ id: deliveries_stops.id })
-        .from(deliveries_stops)
-        .innerJoin(deliveries, eq(deliveries.id, deliveries_stops.delivery_id))
-        .where(and(eq(deliveries_stops.order_id, orderId), sql`${deliveries.status} <> 'cancelled'`))
-        .limit(1);
-      if (activeStop) {
-        throw new WorkflowError("This order is already assigned to an active delivery run and cannot be split.", 409);
-      }
-
-      const existingItems = await tx
-        .select()
-        .from(order_items)
-        .where(eq(order_items.order_id, orderId))
-        .orderBy(asc(order_items.id))
-        .for("update");
-
-      if (!existingItems.length) {
-        throw new WorkflowError("Order has no items to split.", 400);
-      }
-
-      const splitMap = new Map<number, number>();
-      for (const req of input.items) {
-        if (!Number.isInteger(req.split_quantity) || req.split_quantity < 0) {
-          throw new WorkflowError("Split quantities must be whole non-negative numbers.", 400);
-        }
-        splitMap.set(req.order_item_id, (splitMap.get(req.order_item_id) ?? 0) + req.split_quantity);
-      }
-
-      let totalParentRemain = 0;
-      let totalChildMove = 0;
-      const plan: Array<{
-        item: typeof existingItems[number];
-        remainQty: number;
-        moveQty: number;
-      }> = [];
-
-      for (const item of existingItems) {
-        const moveQty = splitMap.get(item.id) ?? 0;
-        if (moveQty > item.quantity) {
-          throw new WorkflowError(`Split quantity (${moveQty}) exceeds ordered quantity (${item.quantity}).`, 400);
-        }
-        const remainQty = item.quantity - moveQty;
-        totalParentRemain += remainQty;
-        totalChildMove += moveQty;
-        plan.push({ item, remainQty, moveQty });
-      }
-
-      if (totalChildMove <= 0) {
-        throw new WorkflowError("Select at least 1 unit to move into the new split shipment.", 400);
-      }
-      if (totalParentRemain <= 0) {
-        throw new WorkflowError("At least 1 unit must remain on the original order.", 400);
-      }
-
-      const [maxSplitRow] = await tx
-        .select({
-          maxSeq: sql<number>`coalesce(max(${orders.split_sequence}), 1)`.mapWith(Number),
-        })
-        .from(orders)
-        .where(eq(orders.parent_order_id, parent.parent_order_id ?? parent.id));
-      const rootOrderId = parent.parent_order_id ?? parent.id;
-      const nextSplitSeq = (maxSplitRow?.maxSeq ?? 1) + 1;
-      const baseOrderNumber = parent.order_number.replace(/-S\d+$/, "");
-      const childOrderNumber = `${baseOrderNumber}-S${nextSplitSeq}`;
-      const now = new Date();
-      const reason = input.reason?.trim() || "Split shipment across multiple delivery trucks";
-
-      const [childOrder] = await tx
-        .insert(orders)
-        .values({
-          order_number: childOrderNumber,
-          warehouse_id: parent.warehouse_id,
-          customer_id: parent.customer_id,
-          payment_arrangement: parent.payment_arrangement,
-          notes: parent.notes ? `${parent.notes}\n[Split from ${parent.order_number}: ${reason}]` : `[Split from ${parent.order_number}: ${reason}]`,
-          stock_reserved: parent.stock_reserved,
-          sales_channel: parent.sales_channel,
-          delivery_method: parent.delivery_method,
-          lalamove_pickup_warehouse_id: parent.lalamove_pickup_warehouse_id,
-          status: parent.status,
-          shipping_recipient: parent.shipping_recipient,
-          shipping_phone: parent.shipping_phone,
-          shipping_address: parent.shipping_address,
-          shipping_latitude: parent.shipping_latitude,
-          shipping_longitude: parent.shipping_longitude,
-          shipping_address_source_id: parent.shipping_address_source_id,
-          staging_bay: parent.staging_bay,
-          staged_at: parent.staged_at,
-          staged_by: parent.staged_by,
-          parent_order_id: rootOrderId,
-          split_sequence: nextSplitSeq,
-          split_reason: reason,
-          created_at: now,
-          updated_at: now,
-        })
-        .returning();
-
-      if (!childOrder) {
-        throw new WorkflowError("Failed to create split child shipment.");
-      }
-
-      for (const entry of plan) {
-        const { item, remainQty, moveQty } = entry;
-        if (remainQty === 0) {
-          await tx.delete(order_items).where(eq(order_items.id, item.id));
-        } else if (moveQty > 0) {
-          const remainPicked = Math.min(item.picked_qty, remainQty);
-          const remainPacked = Math.min(item.packed_qty, remainPicked);
-          await tx
-            .update(order_items)
-            .set({ quantity: remainQty, picked_qty: remainPicked, packed_qty: remainPacked })
-            .where(eq(order_items.id, item.id));
-        }
-        if (moveQty > 0) {
-          const movePicked = parent.status === "SCHEDULING" ? moveQty : Math.max(0, Math.min(moveQty, item.picked_qty - Math.min(item.picked_qty, remainQty)));
-          const movePacked = parent.status === "SCHEDULING" ? moveQty : Math.max(0, Math.min(movePicked, item.packed_qty - Math.min(item.packed_qty, Math.min(item.picked_qty, remainQty))));
-          await tx.insert(order_items).values({
-            order_id: childOrder.id,
-            inventory_id: item.inventory_id,
-            quantity: moveQty,
-            picked_qty: movePicked,
-            packed_qty: movePacked,
-            unit_price_snapshot: item.unit_price_snapshot,
-            unit_cost_snapshot: item.unit_cost_snapshot,
-            price_source: item.price_source,
-          });
-        }
-      }
-
-      const [parentTotalMinor, childTotalMinor] = await Promise.all([
-        this.computeOrderTotalMinor(tx, parent.id),
-        this.computeOrderTotalMinor(tx, childOrder.id),
-      ]);
-      const combinedTotalMinor = parentTotalMinor + childTotalMinor;
-
-      const parentPayments = await tx
-        .select()
-        .from(payments)
-        .where(eq(payments.order_id, parent.id))
-        .orderBy(asc(payments.id))
-        .for("update");
-      const firstPay = parentPayments[0];
-      const originalPaidMinor = parentPayments.reduce(
-        (sum, p) => sum + moneyToMinorUnits(p.amount),
-        0n,
-      );
-
-      let childPaidMinor = 0n;
-      let parentPaidMinor = originalPaidMinor;
-      if (originalPaidMinor > 0n && combinedTotalMinor > 0n) {
-        childPaidMinor = (originalPaidMinor * childTotalMinor) / combinedTotalMinor;
-        if (childPaidMinor > childTotalMinor) childPaidMinor = childTotalMinor;
-        parentPaidMinor = originalPaidMinor - childPaidMinor;
-        if (parentPaidMinor > parentTotalMinor) {
-          const overflow = parentPaidMinor - parentTotalMinor;
-          parentPaidMinor = parentTotalMinor;
-          childPaidMinor += overflow;
-        }
-      }
-
-      const statusFor = (paid: bigint, total: bigint) =>
-        paid <= 0n ? "UNPAID" : paid >= total ? "PAID" : "PARTIALLY_PAID";
-
-      if (firstPay) {
-        await tx
-          .update(payments)
-          .set({
-            amount: minorUnitsToMoney(parentPaidMinor),
-            payment_status: statusFor(parentPaidMinor, parentTotalMinor),
-            version: firstPay.version + 1,
-            updated_at: now,
-          })
-          .where(eq(payments.id, firstPay.id));
-        if (parentPayments.length > 1) {
-          for (const extraPay of parentPayments.slice(1)) {
-            await tx
-              .update(payments)
-              .set({ amount: "0.00", payment_status: statusFor(parentPaidMinor, parentTotalMinor), version: extraPay.version + 1, updated_at: now })
-              .where(eq(payments.id, extraPay.id));
-          }
-        }
-      }
-
-      await PaymentService.createPayment(tx, {
-        payment_number: `PAY-${String(childOrder.id).padStart(6, "0")}`,
-        order_id: childOrder.id,
-        customer_id: parent.customer_id,
-        payment_method: (firstPay?.payment_method ?? "CASH") as PaymentMethodType,
-        payment_type: firstPay?.payment_type ?? null,
-        amount: minorUnitsToMoney(childPaidMinor),
-        payment_status: statusFor(childPaidMinor, childTotalMinor),
-        received_at: childPaidMinor > 0n ? (firstPay?.received_at ?? now) : null,
-      });
-
-      const childItemsForInvoice = plan
-        .filter((p) => p.moveQty > 0)
-        .map((p) => ({ inventory_id: p.item.inventory_id, quantity: p.moveQty }));
-      await InvoiceService.createInvoice(
-        tx,
-        childOrder.id,
-        parent.customer_id,
-        firstPay?.payment_method ?? "CASH",
-        childItemsForInvoice,
-      );
-      if (parent.status === "SCHEDULING") {
-        await tx
-          .update(invoices)
-          .set({ status: "ISSUED", issue_date: now })
-          .where(eq(invoices.order_id, childOrder.id));
-      }
-
-      await tx
-        .update(orders)
-        .set({
-          split_sequence: parent.split_sequence ?? 1,
-          version: parent.version + 1,
-          updated_at: now,
-        })
-        .where(eq(orders.id, parent.id));
-
-      return {
-        parent_order_id: parent.id,
-        parent_order_number: parent.order_number,
-        child_order_id: childOrder.id,
-        child_order_number: childOrder.order_number,
-        split_by: actorId,
-        message: `Order ${parent.order_number} split into independent shipment ${childOrder.order_number}.`,
-      };
-    });
-  }
-
-  static async deliveryOrder(
-    orderId: number,
-    version: number,
-    options?: { requireStaged?: boolean; actorId?: number },
-  ) {
+  static async deliveryOrder(orderId: number, version: number) {
     return await stockTransaction(async (tx) => {
       const [order] = await tx
         .select()
@@ -1859,49 +1432,14 @@ export abstract class OrderService {
         throw new WorkflowError("Order is not processing");
       }
 
-      const items = await tx
-        .select({
-          id: order_items.id,
-          quantity: order_items.quantity,
-          picked_qty: order_items.picked_qty,
-          packed_qty: order_items.packed_qty,
-        })
-        .from(order_items)
-        .where(eq(order_items.order_id, orderId));
-
-      const allStaged = items.length > 0 && items.every(
-        (item) => item.picked_qty === item.quantity && item.packed_qty === item.quantity,
-      );
-
-      if (options?.requireStaged && !allStaged) {
-        throw new WorkflowError(
-          "Complete the Pick, Pack & Stage checklist before moving this order to Scheduling.",
-          409,
-        );
-      }
-
-      const now = new Date();
-      if (!allStaged) {
-        await tx
-          .update(order_items)
-          .set({ picked_qty: sql`${order_items.quantity}`, packed_qty: sql`${order_items.quantity}` })
-          .where(eq(order_items.order_id, orderId));
-      }
-
       await tx
         .update(orders)
-        .set({
-          status: "SCHEDULING",
-          staged_at: order.staged_at ?? now,
-          staged_by: order.staged_by ?? options?.actorId ?? null,
-          version: order.version + 1,
-          updated_at: now,
-        })
+        .set({ status: "SCHEDULING", version: order.version + 1 })
         .where(eq(orders.id, orderId));
 
       await tx
         .update(invoices)
-        .set({ status: "ISSUED", issue_date: now })
+        .set({ status: "ISSUED", issue_date: new Date() })
         .where(eq(invoices.order_id, orderId));
 
       return {

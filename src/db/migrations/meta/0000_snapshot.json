@@ -1,5 +1,5 @@
 {
-  "id": "d0ef65cd-1f0f-471f-ae47-5ca2636a04ba",
+  "id": "82a8659b-8dda-436f-bd45-6fcfbbc9d377",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -1844,6 +1844,146 @@
       },
       "isRLSEnabled": false
     },
+    "public.driver_return_proofs": {
+      "name": "driver_return_proofs",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "return_id": {
+          "name": "return_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor_id": {
+          "name": "actor_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "operation_key": {
+          "name": "operation_key",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "storage_key": {
+          "name": "storage_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content_type": {
+          "name": "content_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sha256": {
+          "name": "sha256",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "byte_size": {
+          "name": "byte_size",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "driver_return_proofs_return_idx": {
+          "name": "driver_return_proofs_return_idx",
+          "columns": [
+            {
+              "expression": "return_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "driver_return_proofs_return_id_customer_returns_id_fk": {
+          "name": "driver_return_proofs_return_id_customer_returns_id_fk",
+          "tableFrom": "driver_return_proofs",
+          "tableTo": "customer_returns",
+          "columnsFrom": [
+            "return_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "driver_return_proofs_actor_id_users_id_fk": {
+          "name": "driver_return_proofs_actor_id_users_id_fk",
+          "tableFrom": "driver_return_proofs",
+          "tableTo": "users",
+          "columnsFrom": [
+            "actor_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "driver_return_proofs_operation_key_unique": {
+          "name": "driver_return_proofs_operation_key_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "operation_key"
+          ]
+        },
+        "driver_return_proofs_storage_key_unique": {
+          "name": "driver_return_proofs_storage_key_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "storage_key"
+          ]
+        },
+        "driver_return_proof_operation": {
+          "name": "driver_return_proof_operation",
+          "nullsNotDistinct": false,
+          "columns": [
+            "return_id",
+            "operation_key"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.driver_stop_proofs": {
       "name": "driver_stop_proofs",
       "schema": "",
@@ -2906,7 +3046,7 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "default": 1795163713
+          "default": 1795177284
         }
       },
       "indexes": {
@@ -2954,6 +3094,28 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "notifications_user_title_unread_idx": {
+          "name": "notifications_user_title_unread_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "title",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"notifications\".\"is_read\" = false",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -2972,16 +3134,7 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "notifications_user_title_unique_idx": {
-          "name": "notifications_user_title_unique_idx",
-          "nullsNotDistinct": false,
-          "columns": [
-            "user_id",
-            "title"
-          ]
-        }
-      },
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -4635,6 +4788,222 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.vehicle_maintenance_logs": {
+      "name": "vehicle_maintenance_logs",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "vehicle_maintenance_logs_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "vehicle_id": {
+          "name": "vehicle_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reported_by": {
+          "name": "reported_by",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "completed_by": {
+          "name": "completed_by",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "maintenance_type": {
+          "name": "maintenance_type",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'repair'"
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(24)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'open'"
+        },
+        "title": {
+          "name": "title",
+          "type": "varchar(160)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "workshop_name": {
+          "name": "workshop_name",
+          "type": "varchar(160)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "odometer_km": {
+          "name": "odometer_km",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "estimated_cost": {
+          "name": "estimated_cost",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "actual_cost": {
+          "name": "actual_cost",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "put_in_maintenance": {
+          "name": "put_in_maintenance",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expected_return_at": {
+          "name": "expected_return_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "vehicle_maintenance_logs_vehicle_idx": {
+          "name": "vehicle_maintenance_logs_vehicle_idx",
+          "columns": [
+            {
+              "expression": "vehicle_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "vehicle_maintenance_logs_vehicle_id_vehicles_id_fk": {
+          "name": "vehicle_maintenance_logs_vehicle_id_vehicles_id_fk",
+          "tableFrom": "vehicle_maintenance_logs",
+          "tableTo": "vehicles",
+          "columnsFrom": [
+            "vehicle_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "cascade"
+        },
+        "vehicle_maintenance_logs_reported_by_users_id_fk": {
+          "name": "vehicle_maintenance_logs_reported_by_users_id_fk",
+          "tableFrom": "vehicle_maintenance_logs",
+          "tableTo": "users",
+          "columnsFrom": [
+            "reported_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "vehicle_maintenance_logs_completed_by_users_id_fk": {
+          "name": "vehicle_maintenance_logs_completed_by_users_id_fk",
+          "tableFrom": "vehicle_maintenance_logs",
+          "tableTo": "users",
+          "columnsFrom": [
+            "completed_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "vehicle_maint_type_check": {
+          "name": "vehicle_maint_type_check",
+          "value": "\"vehicle_maintenance_logs\".\"maintenance_type\" IN ('preventive', 'repair', 'tire_battery', 'inspection', 'breakdown')"
+        },
+        "vehicle_maint_status_check": {
+          "name": "vehicle_maint_status_check",
+          "value": "\"vehicle_maintenance_logs\".\"status\" IN ('open', 'in_progress', 'completed', 'cancelled')"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.vehicles": {
       "name": "vehicles",
       "schema": "",
@@ -4693,6 +5062,19 @@
         "max_volume_cbm": {
           "name": "max_volume_cbm",
           "type": "numeric(10, 3)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "current_odometer_km": {
+          "name": "current_odometer_km",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "next_service_odometer_km": {
+          "name": "next_service_odometer_km",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false
         },

@@ -181,74 +181,10 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
     },
   )
   .post(
-    "/:id/pick-pack",
-    async ({ params, body, user }) => {
-      await assertOrderScope(params.id, await staffWarehouse(user));
-      const result = await OrderService.updatePickPackStage(params.id, Number(user.sub), body);
-      const order = await OrderService.getOrderTableRowById(result.id);
-      return { ...result, order };
-    },
-    {
-      detail: {
-        summary: "Verify Pick, Pack & Stage checklist for an order",
-        description: "Updates line-item picked/packed quantities, staging bay, and optionally advances a fully staged order to SCHEDULING.",
-        tags: ["Orders"],
-      },
-      params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
-      body: t.Object({
-        version: t.Integer({ minimum: 1 }),
-        staging_bay: t.Optional(t.Nullable(t.String({ maxLength: 64 }))),
-        advance_to_scheduling: t.Optional(t.Boolean()),
-        items: t.Array(
-          t.Object({
-            order_item_id: t.Integer({ minimum: 1 }),
-            picked_qty: t.Integer({ minimum: 0 }),
-            packed_qty: t.Integer({ minimum: 0 }),
-          }),
-          { minItems: 1 },
-        ),
-      }),
-    },
-  )
-  .post(
-    "/:id/split",
-    async ({ params, body, user }) => {
-      await assertOrderScope(params.id, await staffWarehouse(user));
-      const result = await OrderService.splitOrder(params.id, Number(user.sub), body);
-      const [parent, child] = await Promise.all([
-        OrderService.getOrderTableRowById(result.parent_order_id),
-        OrderService.getOrderTableRowById(result.child_order_id),
-      ]);
-      return { ...result, parent, child };
-    },
-    {
-      detail: {
-        summary: "Split an order into an independent child shipment",
-        description: "Moves selected line-item quantities into a new independently schedulable shipment across multiple trucks while preserving stock reservations and proportional payments.",
-        tags: ["Orders"],
-      },
-      params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
-      body: t.Object({
-        version: t.Integer({ minimum: 1 }),
-        reason: t.Optional(t.Nullable(t.String({ maxLength: 255 }))),
-        items: t.Array(
-          t.Object({
-            order_item_id: t.Integer({ minimum: 1 }),
-            split_quantity: t.Integer({ minimum: 0 }),
-          }),
-          { minItems: 1 },
-        ),
-      }),
-    },
-  )
-  .post(
     "/delivery/:id",
     async ({ query, params, user }) => {
       await assertOrderScope(params.id, await staffWarehouse(user));
-      const result = await OrderService.deliveryOrder(params.id, query.version, {
-        requireStaged: query.auto_stage !== "true",
-        actorId: Number(user.sub),
-      });
+      const result = await OrderService.deliveryOrder(params.id, query.version);
       const order = await OrderService.getOrderTableRowById(result.id);
 
       if (!order) throw new Error("Failed to load delivery-ready order.");
@@ -259,7 +195,6 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
       detail: { summary: 'Create delivery by id', description: 'POST endpoint for delivery by id in the orders module.', tags: ['Orders'] },
       query: t.Object({
         version: t.Numeric({ minimum: 1 }),
-        auto_stage: t.Optional(t.String()),
       }),
       params: t.Object({
         id: t.Numeric({ minimum: 1 }),
