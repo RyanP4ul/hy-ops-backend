@@ -18,7 +18,7 @@
     "production:db:push": "bun --env-file=.env.production drizzle-kit push",
 	"production:db:seed": "bun --env-file=.env.production src/db/seeds",
 	
-    "db:studio": "drizzle-kit studio",
+    "db:studio": "bun --env-file=.env.development drizzle-kit studio",
     "db:drop": "drizzle-kit drop",
     
     "lint": "oxlint",
