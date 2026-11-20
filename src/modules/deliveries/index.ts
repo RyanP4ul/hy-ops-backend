@@ -43,6 +43,45 @@ export const deliveriesRoutes = new Elysia({
       tags: ["Deliveries"],
     },
   })
+  .patch(
+    "/:id/expenses/:expenseId",
+    async ({ params, body, user }) =>
+      DeliveryService.settleExpense(
+        params.id,
+        params.expenseId,
+        body,
+        Number(user.sub),
+        await staffWarehouse(user),
+      ),
+    {
+      params: t.Object({
+        id: t.Numeric({ minimum: 1, multipleOf: 1 }),
+        expenseId: t.Numeric({ minimum: 1, multipleOf: 1 }),
+      }),
+      body: t.Object({
+        status: t.Union([t.Literal("approved"), t.Literal("rejected")]),
+        actual_delivery_allowance: t.Optional(t.Numeric({ minimum: 0 })),
+        actual_fuel: t.Optional(t.Numeric({ minimum: 0 })),
+        actual_toll: t.Optional(t.Numeric({ minimum: 0 })),
+        settlement_notes: t.Optional(t.String({ maxLength: 500 })),
+        version: t.Integer({ minimum: 1 }),
+      }),
+      detail: {
+        summary: "Settle a delivery expense",
+        description: "Approve or reject a delivery expense with optional actual allowance, fuel, and toll amounts.",
+        tags: ["Deliveries"],
+      },
+    },
+  )
+  .get("/:id/return-summary", async ({ params, user }) =>
+    DeliveryService.getReturnSummary(params.id, await staffWarehouse(user)), {
+    params: t.Object({ id: t.Numeric({ minimum: 1, multipleOf: 1 }) }),
+    detail: {
+      summary: "Get warehouse return summary",
+      description: "Retrieve failed stops, collected return pickups, and unpaid COD deliveries before confirming warehouse return.",
+      tags: ["Deliveries"],
+    },
+  })
   .get("/calendar", async ({ user }) => getDeliveryCalendar(await staffWarehouse(user)), {
     detail: {
       summary: "Get delivery calendar",
@@ -77,10 +116,10 @@ export const deliveriesRoutes = new Elysia({
       tags: ["Deliveries"],
     },
   })
-  .get("/returns", ({ user }) => CustomerReturnService.list(user), {
+  .get("/returns", ({ user, query }) => CustomerReturnService.list(user, undefined, undefined, query.includeReceived === "true"), {
     detail: {
       summary: "List customer returns",
-      description: "Retrieve customer return requests.",
+      description: "Retrieve customer return requests. Pass includeReceived=true to include physically received returns awaiting disposition.",
       tags: ["Deliveries"],
     },
   })
@@ -110,6 +149,46 @@ export const deliveriesRoutes = new Elysia({
       tags: ["Deliveries"],
     },
   })
+  .post("/returns/:id/unassign", ({ user, params, body }) => CustomerReturnService.unassign(user, params.id, body), {
+    params: t.Object({ id: t.Numeric({ minimum: 1, multipleOf: 1 }) }),
+    body: t.Object({ version: t.Integer({ minimum: 1 }), reason: t.Optional(t.String({ maxLength: 500 })) }),
+    detail: {
+      summary: "Unassign a customer return",
+      description: "Return an assigned or failed customer return pickup back to requested state for reassignment.",
+      tags: ["Deliveries"],
+    },
+  })
+  .post("/returns/:id/cancel", ({ user, params, body }) => CustomerReturnService.cancel(user, params.id, body), {
+    params: t.Object({ id: t.Numeric({ minimum: 1, multipleOf: 1 }) }),
+    body: t.Object({ version: t.Integer({ minimum: 1 }), reason: t.String({ minLength: 1, maxLength: 500 }), confirmed: t.Literal(true) }),
+    detail: {
+      summary: "Cancel a customer return request",
+      description: "Cancel a requested or failed customer return pickup.",
+      tags: ["Deliveries"],
+    },
+  })
+  .post("/returns/:id/dispose", ({ user, params, body }) => CustomerReturnService.dispose(user, params.id, body), {
+    params: t.Object({ id: t.Numeric({ minimum: 1, multipleOf: 1 }) }),
+    body: t.Object({
+      version: t.Integer({ minimum: 1 }),
+      operationKey: t.String({ format: "uuid" }),
+      notes: t.String({ minLength: 1, maxLength: 500 }),
+      items: t.Array(
+        t.Object({
+          inventoryId: t.Integer({ minimum: 1 }),
+          restockedQty: t.Integer({ minimum: 0 }),
+          damagedQty: t.Integer({ minimum: 0 }),
+        }),
+        { minItems: 1 },
+      ),
+      confirmed: t.Literal(true),
+    }),
+    detail: {
+      summary: "Record inspection disposition for a received return",
+      description: "Restock resellable items and log damaged write-offs for a physically received customer return.",
+      tags: ["Deliveries"],
+    },
+  })
   .get("/stops/:id/proofs", ({ user, params }) => proofService.list(user, params.id), {
     params: t.Object({ id: t.Numeric({ minimum: 1, multipleOf: 1 }) }),
     detail: {
@@ -123,6 +202,22 @@ export const deliveriesRoutes = new Elysia({
     detail: {
       summary: "Download a delivery proof",
       description: "Download a proof-of-delivery file for a stop.",
+      tags: ["Deliveries"],
+    },
+  })
+  .get("/returns/:id/proofs", ({ user, params }) => proofService.listReturnProofs(user, params.id), {
+    params: t.Object({ id: t.Numeric({ minimum: 1, multipleOf: 1 }) }),
+    detail: {
+      summary: "List customer return pickup proofs",
+      description: "Retrieve proof-of-collection files for a customer return pickup.",
+      tags: ["Deliveries"],
+    },
+  })
+  .get("/returns/:id/proofs/:proofId", ({ user, params }) => proofService.downloadReturnProof(user, params.id, params.proofId), {
+    params: t.Object({ id: t.Numeric({ minimum: 1, multipleOf: 1 }), proofId: t.String({ format: "uuid" }) }),
+    detail: {
+      summary: "Download a customer return pickup proof",
+      description: "Download a proof-of-collection file for a customer return pickup.",
       tags: ["Deliveries"],
     },
   })
@@ -207,13 +302,33 @@ export const deliveriesRoutes = new Elysia({
   )
   .post(
     "/:id/complete",
-    async ({ params, user }) => DeliveryService.completeDelivery(params.id, await staffWarehouse(user), Number(user.sub)),
+    async ({ params, body, user }) =>
+      DeliveryService.completeDelivery(
+        params.id,
+        await staffWarehouse(user),
+        Number(user.sub),
+        false,
+        body?.codCollections,
+      ),
     {
       params: DeliveryIdParams,
+      body: t.Optional(
+        t.Object({
+          codCollections: t.Optional(
+            t.Array(
+              t.Object({
+                paymentNumber: t.String({ minLength: 1 }),
+                amountReceived: t.Numeric({ minimum: 0 }),
+                version: t.Integer({ minimum: 1 }),
+              }),
+            ),
+          ),
+        }),
+      ),
       response: OkResponse,
       detail: {
         summary: "Complete a delivery",
-        description: "Mark a delivery as completed.",
+        description: "Mark a delivery as completed and optionally record COD cash remittance receipts.",
         tags: ["Deliveries"],
       },
     },

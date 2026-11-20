@@ -45,6 +45,7 @@ export const product_variants = pgTable(
     sku: varchar({ length: 255 }).notNull(),
     description: varchar({ length: 255 }),
     price: decimal({ precision: 10, scale: 2 }).notNull(),
+    cost_price: decimal("cost_price", { precision: 10, scale: 2 }),
     unit: varchar({ length: 50 }).notNull(),
     weight_kg: decimal({ precision: 10, scale: 2 }),
     width_value: decimal({ precision: 10, scale: 2 }),
@@ -56,10 +57,7 @@ export const product_variants = pgTable(
   },
   (t) => [
     index("product_variants_id_idx").on(t.id),
-    unique("product_variants_product_id_sku_unique_idx").on(
-      t.product_id,
-      t.sku,
-    ),
+    unique("product_variants_sku_unique_idx").on(t.sku),
   ],
 );
 

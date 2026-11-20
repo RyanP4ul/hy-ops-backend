@@ -8,16 +8,14 @@ export const deliveryCreate = t.Object({
   order_ids: t.Array(t.Numeric({ minimum: 1 })),
   scheduled_date: t.String(),
   scheduled_time: t.String(),
-  delivery_type: t.Union([
-    t.Literal("LALAMOVE"),
-    t.Literal("PICKUP"),
-    t.Literal("INTERNAL"),
-  ]),
+  delivery_type: t.Optional(t.Literal("INTERNAL")),
   driver_id: t.Numeric({ minimum: 1 }),
   vehicle_id: t.Numeric({ minimum: 1 }),
   delivery_allowance: t.Numeric({ minimum: 0 }),
   fuel: t.Numeric({ minimum: 0 }),
   toll: t.Numeric({ minimum: 0 }),
+  estimated_duration_minutes: t.Optional(t.Numeric({ minimum: 15, maximum: 1440 })),
+  allow_overload: t.Optional(t.Boolean()),
 });
 
 export const deliveryEvent = t.Object({
@@ -33,6 +31,7 @@ export const deliveryAssignment = t.Object({
   driver_id: t.Numeric({ minimum: 1 }),
   vehicle_id: t.Numeric({ minimum: 1 }),
   delivery_version: t.Numeric({ minimum: 1 }),
+  allow_overload: t.Optional(t.Boolean()),
 });
 
 export const deliveryModel = new Elysia().model({

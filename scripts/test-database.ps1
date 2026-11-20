@@ -1,4 +1,4 @@
-param([ValidateSet('Database', 'Driver', 'Sync', 'Live', 'Mobile', 'Backup', 'Realtime', 'Lalamove', 'Lifecycle', 'LifecycleRegression', 'Retention', 'RetentionBrowser', 'DeliveryNotifications', 'RealtimePages')][string]$Suite = 'Database', [ValidateSet('All', 'Selected', 'DashboardReports', 'Orders', 'Deliveries', 'UIUX', 'Operations', 'Authorization', 'Driver')][string]$BrowserScope = 'All', [string]$BrowserFilter = '')
+param([ValidateSet('Database', 'Driver', 'Sync', 'GapRemediation', 'Live', 'Mobile', 'Backup', 'Realtime', 'Lalamove', 'Lifecycle', 'LifecycleRegression', 'Retention', 'RetentionBrowser', 'DeliveryNotifications', 'RealtimePages')][string]$Suite = 'Database', [ValidateSet('All', 'Selected', 'DashboardReports', 'Orders', 'Deliveries', 'UIUX', 'Operations', 'Authorization', 'Driver')][string]$BrowserScope = 'All', [string]$BrowserFilter = '')
 $ErrorActionPreference = 'Stop'
 $backendRoot = Split-Path -Parent $PSScriptRoot
 function Get-FixtureMigration([string]$Name) {
@@ -40,7 +40,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Fixture schema creation failed.' }
   # Reconstruct only the columns/tables changed by the incremental migrations.
   # The target is always the new, empty loopback fixture created above.
-  if ($Suite -notin @('Sync', 'Lifecycle', 'LifecycleRegression', 'Retention', 'RetentionBrowser', 'DeliveryNotifications', 'RealtimePages')) {
+  if ($Suite -notin @('Sync', 'GapRemediation', 'Lifecycle', 'LifecycleRegression', 'Retention', 'RetentionBrowser', 'DeliveryNotifications', 'RealtimePages')) {
   $legacyPath = Join-Path $fixtureRoot 'legacy-columns.sql'
   @'
 DROP TABLE payment_group_allocations;
@@ -82,6 +82,8 @@ ALTER TABLE orders ADD CONSTRAINT orders_warehouse_id_users_id_fk FOREIGN KEY (w
   if ($LASTEXITCODE -ne 0) { throw 'Lalamove migration failed.' }
   & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Get-FixtureMigration '0001_cuddly_chronomancer.sql')
   if ($LASTEXITCODE -ne 0) { throw 'Warehouse pickup migration failed.' }
+  & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $fixturePort -U hyops_test -d hyops_test -v ON_ERROR_STOP=1 -f (Get-FixtureMigration '0001_p0_hardening.sql')
+  if ($LASTEXITCODE -ne 0) { throw 'P0 hardening migration failed.' }
   }
   if ($Suite -in @('Lifecycle', 'LifecycleRegression', 'Retention', 'RetentionBrowser')) {
     # Verify the incremental migration against pre-retention columns in the fixture.
@@ -112,6 +114,12 @@ ALTER TABLE vehicles ADD COLUMN image varchar(255) NOT NULL DEFAULT '';
     if ($LASTEXITCODE -ne 0) { throw 'Delivery notification database tests failed.' }
     & bun test --timeout 60000 ./tests/driver-socket.test.ts -t 'delivery notification'
     if ($LASTEXITCODE -ne 0) { throw 'Delivery notification socket test failed.' }
+  }
+  elseif ($Suite -eq 'GapRemediation') {
+    foreach ($testFile in @('./tests/gap-remediation.test.ts', './tests/customer-returns.test.ts', './tests/driver-features.test.ts')) {
+      & bun test --timeout 60000 $testFile
+      if ($LASTEXITCODE -ne 0) { throw "GapRemediation acceptance failed: $testFile" }
+    }
   }
   elseif ($Suite -eq 'Sync') {
     # The receipt table may now be part of the user's consolidated baseline.

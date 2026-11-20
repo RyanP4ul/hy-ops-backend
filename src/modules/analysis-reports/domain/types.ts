@@ -8,12 +8,12 @@ export interface DeliveryView {
   warehouseId: number; cost: number; costStatus: ExpenseStatus | null;
 }
 export interface ItemView {
-  inventoryId: number; productId: number; product: string; variantId: number; variant: string; sku: string; qty: number; line: number | null;
+  inventoryId: number; productId: number; product: string; variantId: number; variant: string; sku: string; qty: number; line: number | null; costLine?: number | null;
 }
 export interface OrderView {
   salesChannel?: "STANDARD" | "WALK_IN";
   id: number; number: string; at: number; customerId: number; customer: string; warehouseId: number; warehouse: string; status: OrderStatus;
-  arrangement: PaymentArrangement; items: ItemView[]; total: number | null; paid: number; balance: number | null; dueAt: number | null;
+  arrangement: PaymentArrangement; items: ItemView[]; total: number | null; costTotal?: number | null; paid: number; balance: number | null; dueAt: number | null;
   payStatus: PaymentStatus; delivery: DeliveryView | null;
 }
 export interface StopView { id: number; status: StopStatus; deliveredAt: number | null; delivery: DeliveryView; order: OrderView }

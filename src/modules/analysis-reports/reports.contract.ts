@@ -81,6 +81,7 @@ export interface OverviewResponse {
   kpis: {
     revenue: number | null; revenueDelta: Delta; orders: number; ordersDelta: Delta; cash: number; cashDelta: Delta;
     outstanding: number | null; delivered: number; deliveredDelta: Delta; failureRate: number;
+    cogs?: number | null; grossProfit?: number | null; grossMarginPct?: number | null; deliveryExpenses?: number;
   };
   trend: Record<Grain, Point[]>;
   ordersByStatus: Point[];

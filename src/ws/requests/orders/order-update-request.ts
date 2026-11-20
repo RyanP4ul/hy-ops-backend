@@ -13,7 +13,7 @@ export class UpdateOrderHandler extends RequestBase<typeof UpdateOrderHandler.sc
     const data_parsed = JSON.parse(order_data) as {
       id: number;
       customer_id: number;
-      delivery_type: "LALAMOVE" | "PICKUP" | "INTERNAL";
+      delivery_type: "LALAMOVE" | "INTERNAL";
       notes: string | null;
       customer_name?: string;
       customer_email?: string;

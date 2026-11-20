@@ -10,6 +10,11 @@ export const warehouse_schema = t.Object({
   clear_coordinates: t.Optional(t.Boolean()),
   latitude: t.Optional(t.Number({ minimum: -90, maximum: 90 })),
   longitude: t.Optional(t.Number({ minimum: -180, maximum: 180 })),
+  daily_order_limit: t.Optional(t.Union([t.Integer({ minimum: 1 }), t.Null()])),
+  operating_days: t.Optional(
+    t.Union([t.Array(t.Integer({ minimum: 0, maximum: 6 }), { minItems: 1, maxItems: 7 }), t.Null()]),
+  ),
+  arrival_radius_m: t.Optional(t.Union([t.Integer({ minimum: 25, maximum: 5000 }), t.Null()])),
 });
 
 export type WarehouseType = Static<typeof warehouse_schema>;

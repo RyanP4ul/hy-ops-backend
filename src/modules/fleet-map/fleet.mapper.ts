@@ -239,7 +239,7 @@ export function buildFleetOverview(raw: FleetRawData): FleetOverviewDto {
       completedStops,
       status,
       blockedReason,
-      speed: status === "available" ? 0 : 35,
+      speed: 0,
     };
   });
 

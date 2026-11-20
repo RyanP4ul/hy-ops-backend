@@ -10,7 +10,7 @@ import { customer_returns } from "../../db/schema/customer-returns";
 import { driver_stop_outcomes } from "../../db/schema/driver-outcomes";
 import { assertDeliveryScope } from "./scope";
 import { WorkflowError } from "../../utils/workflow-error";
-import { stockTransaction } from "../inventory/transaction";
+import { stockTransaction, type StockTransaction } from "../inventory/transaction";
 import { coordinates } from "../../utils/coordinates";
 import { changeOrderStock } from "../order/stock";
 import { assertNoExternalClaim } from "../lalamove/fulfillment";
@@ -29,7 +29,7 @@ import {
 } from "./modal";
 import { OrderService } from "../order/service";
 import { orders } from "@/db/schema/order";
-import { count, eq, ilike, and, sql, inArray, or, asc } from "drizzle-orm";
+import { count, eq, ilike, and, sql, inArray, or, asc, ne } from "drizzle-orm";
 import {
   customer_addresses,
   customers,
@@ -38,6 +38,11 @@ import {
 } from "@/db/schema/users";
 import { vehicles } from "@/db/schema/vehicles";
 import { inventory } from "@/db/schema/inventory";
+import { product_variants } from "@/db/schema/products";
+import { payments } from "@/db/schema/payment";
+import { payment_receipts } from "@/db/schema/payment-receipt";
+import { preserveReceiptBaseline } from "../payments/receipts";
+import { minorUnitsToMoney, moneyToMinorUnits } from "../../utils/money";
 import { stock_movements } from "../../db/schema/stock-movement";
 import { order_items } from "@/db/schema/order";
 import { warehouses } from "@/db/schema/warehouses";
@@ -48,15 +53,118 @@ import {
   todayInManila,
 } from "../../utils/time";
 
+const DEFAULT_SCHEDULE_WINDOW_MINUTES = 120;
+const SCHEDULE_TURNAROUND_BUFFER_MINUTES = 30;
+
+function parseTimeToMinutes(value: string): number {
+  const [hoursStr = "0", minutesStr = "0"] = value.split(":");
+  const hours = Number(hoursStr);
+  const minutes = Number(minutesStr);
+  return (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0);
+}
+
+function scheduleWindowMinutes(estimatedDurationMinutes?: number | null): number {
+  if (
+    estimatedDurationMinutes !== undefined &&
+    estimatedDurationMinutes !== null &&
+    Number.isFinite(estimatedDurationMinutes) &&
+    estimatedDurationMinutes > 0
+  ) {
+    return Math.min(1440, Math.max(30, Math.round(estimatedDurationMinutes) + SCHEDULE_TURNAROUND_BUFFER_MINUTES));
+  }
+  return DEFAULT_SCHEDULE_WINDOW_MINUTES;
+}
+
+async function assertNoScheduleConflict(
+  tx: StockTransaction,
+  input: {
+    driverId: number;
+    vehicleId: number;
+    scheduledDate: string;
+    departureTime: string;
+    estimatedDurationMinutes?: number | null;
+    excludeDeliveryId?: number;
+  },
+) {
+  const newStart = parseTimeToMinutes(input.departureTime);
+  const newEnd = newStart + scheduleWindowMinutes(input.estimatedDurationMinutes);
+  const existingRuns = await tx
+    .select({
+      id: deliveries.id,
+      driver_id: deliveries.driver_id,
+      vehicle_id: deliveries.vehicle_id,
+      departure_time: deliveries.departure_time,
+      estimated_duration_minutes: deliveries.estimated_duration_minutes,
+    })
+    .from(deliveries)
+    .where(
+      and(
+        eq(deliveries.scheduled_date, input.scheduledDate),
+        inArray(deliveries.status, ["scheduled", "in_transit", "returning"]),
+        or(
+          eq(deliveries.driver_id, input.driverId),
+          eq(deliveries.vehicle_id, input.vehicleId),
+        ),
+        input.excludeDeliveryId !== undefined
+          ? ne(deliveries.id, input.excludeDeliveryId)
+          : undefined,
+      ),
+    )
+    .for("share");
+
+  for (const run of existingRuns) {
+    const existingStart = parseTimeToMinutes(run.departure_time);
+    const existingEnd = existingStart + scheduleWindowMinutes(run.estimated_duration_minutes);
+    if (newStart < existingEnd && existingStart < newEnd) {
+      if (run.driver_id === input.driverId) {
+        throw new WorkflowError(
+          `This driver already has an overlapping delivery (#${run.id} at ${run.departure_time.slice(0, 5)}) on ${input.scheduledDate}. Choose another time or driver.`,
+          409,
+        );
+      }
+      throw new WorkflowError(
+        `This vehicle already has an overlapping delivery (#${run.id} at ${run.departure_time.slice(0, 5)}) on ${input.scheduledDate}. Choose another time or vehicle.`,
+        409,
+      );
+    }
+  }
+}
+
 function schedulingConflict(error: unknown): never {
   const detail = error as { code?: string; cause?: { code?: string } };
   if (detail?.code === "23505" || detail?.cause?.code === "23505") {
     throw new WorkflowError(
-      "This driver already has a delivery recorded at that departure time. Choose another time or driver.",
+      "This driver or vehicle already has a delivery recorded at that departure time. Choose another time, driver, or vehicle.",
       409,
     );
   }
   throw error;
+}
+
+async function assertVehiclePayloadCapacity(
+  tx: StockTransaction,
+  vehicle: { plate_number: string; max_weight_kg: string | null },
+  orderIds: number[],
+  allowOverload = false,
+) {
+  if (allowOverload || vehicle.max_weight_kg === null || !orderIds.length) return;
+  const maxWeight = Number(vehicle.max_weight_kg);
+  if (!Number.isFinite(maxWeight) || maxWeight <= 0) return;
+  const [load] = await tx
+    .select({
+      totalWeightKg: sql<string>`coalesce(sum(${order_items.quantity} * coalesce(${product_variants.weight_kg}, 0)), 0)::text`,
+    })
+    .from(order_items)
+    .innerJoin(inventory, eq(inventory.id, order_items.inventory_id))
+    .innerJoin(product_variants, eq(product_variants.id, inventory.product_variant_id))
+    .where(inArray(order_items.order_id, orderIds));
+  const totalWeight = Number(load?.totalWeightKg ?? 0);
+  if (Number.isFinite(totalWeight) && totalWeight > maxWeight) {
+    throw new WorkflowError(
+      `Selected orders weigh ${totalWeight.toFixed(1)} kg, exceeding vehicle ${vehicle.plate_number} capacity (${maxWeight.toFixed(1)} kg). Choose a larger vehicle or split the run.`,
+      409,
+    );
+  }
 }
 
 export abstract class DeliveryService {
@@ -74,11 +182,225 @@ export abstract class DeliveryService {
         delivery_allowance: deliveries_expenses.delivery_allowance,
         fuel: deliveries_expenses.fuel,
         toll: deliveries_expenses.toll,
+        actual_delivery_allowance: deliveries_expenses.actual_delivery_allowance,
+        actual_fuel: deliveries_expenses.actual_fuel,
+        actual_toll: deliveries_expenses.actual_toll,
+        settlement_notes: deliveries_expenses.settlement_notes,
+        settled_at: deliveries_expenses.settled_at,
+        version: deliveries_expenses.version,
         status: deliveries_expenses.status,
       })
       .from(deliveries_expenses)
       .where(eq(deliveries_expenses.delivery_id, id))
       .orderBy(asc(deliveries_expenses.id));
+  }
+
+  static async settleExpense(
+    deliveryId: number,
+    expenseId: number,
+    input: {
+      status: "approved" | "rejected";
+      actual_delivery_allowance?: number;
+      actual_fuel?: number;
+      actual_toll?: number;
+      settlement_notes?: string;
+      version: number;
+    },
+    actorId: number,
+    warehouseId?: number,
+  ) {
+    return stockTransaction(async (tx) => {
+      await assertDeliveryScope(tx, deliveryId, warehouseId);
+      const [delivery] = await tx
+        .select({ id: deliveries.id, status: deliveries.status })
+        .from(deliveries)
+        .where(eq(deliveries.id, deliveryId))
+        .for("share");
+      if (!delivery) throw new WorkflowError("Delivery not found.", 404);
+      if (delivery.status === "cancelled")
+        throw new WorkflowError("Expenses for a cancelled delivery cannot be approved.", 409);
+
+      const [expense] = await tx
+        .select()
+        .from(deliveries_expenses)
+        .where(
+          and(
+            eq(deliveries_expenses.id, expenseId),
+            eq(deliveries_expenses.delivery_id, deliveryId),
+          ),
+        )
+        .for("update");
+      if (!expense) throw new WorkflowError("Delivery expense record not found.", 404);
+      if (expense.version !== input.version)
+        throw new WorkflowError("Expense record changed. Refresh and try again.", 409);
+
+      const allowance =
+        input.actual_delivery_allowance !== undefined
+          ? String(input.actual_delivery_allowance)
+          : (expense.actual_delivery_allowance ?? expense.delivery_allowance);
+      const fuel =
+        input.actual_fuel !== undefined
+          ? String(input.actual_fuel)
+          : (expense.actual_fuel ?? expense.fuel);
+      const toll =
+        input.actual_toll !== undefined
+          ? String(input.actual_toll)
+          : (expense.actual_toll ?? expense.toll);
+
+      const now = new Date();
+      const [updated] = await tx
+        .update(deliveries_expenses)
+        .set({
+          status: input.status,
+          actual_delivery_allowance: allowance,
+          actual_fuel: fuel,
+          actual_toll: toll,
+          settlement_notes: input.settlement_notes?.trim() || null,
+          settled_by: actorId,
+          settled_at: now,
+          version: expense.version + 1,
+          updated_at: now,
+        })
+        .where(eq(deliveries_expenses.id, expenseId))
+        .returning();
+
+      return updated;
+    });
+  }
+
+  static async getReturnSummary(deliveryId: number, warehouseId?: number) {
+    await assertDeliveryScope(db, deliveryId, warehouseId);
+    const [delivery] = await db
+      .select({ id: deliveries.id, status: deliveries.status })
+      .from(deliveries)
+      .where(eq(deliveries.id, deliveryId));
+    if (!delivery) throw new WorkflowError("Delivery not found.", 404);
+
+    const stops = await db
+      .select({
+        stopId: deliveries_stops.id,
+        stopStatus: deliveries_stops.status,
+        orderId: orders.id,
+        orderNumber: orders.order_number,
+        paymentArrangement: orders.payment_arrangement,
+        customerName: sql<string>`coalesce(nullif(trim(${orders.shipping_recipient}), ''), ${users.name})`,
+        failureReason: driver_stop_outcomes.reason,
+      })
+      .from(deliveries_stops)
+      .innerJoin(orders, eq(orders.id, deliveries_stops.order_id))
+      .innerJoin(customers, eq(customers.id, orders.customer_id))
+      .innerJoin(users, eq(users.id, customers.user_id))
+      .leftJoin(
+        driver_stop_outcomes,
+        eq(driver_stop_outcomes.stop_id, deliveries_stops.id),
+      )
+      .where(eq(deliveries_stops.delivery_id, deliveryId))
+      .orderBy(asc(deliveries_stops.leg_index), asc(deliveries_stops.id));
+
+    const pickups = await CustomerReturnService.list(undefined, deliveryId);
+    const codOrderIds = stops
+      .filter(
+        (s) =>
+          s.stopStatus === "delivered" &&
+          s.paymentArrangement === "PAY_ON_DELIVERY",
+      )
+      .map((s) => s.orderId);
+
+    let codOrders: Array<{
+      orderId: number;
+      orderNumber: string;
+      customerName: string;
+      paymentNumber: string;
+      paymentVersion: number;
+      paymentStatus: string;
+      orderTotal: string | null;
+      amountPaid: string;
+      remainingAmount: string | null;
+    }> = [];
+
+    if (codOrderIds.length) {
+      const [paymentRows, totalRows] = await Promise.all([
+        db
+          .select({
+            orderId: payments.order_id,
+            paymentNumber: payments.payment_number,
+            version: payments.version,
+            status: payments.payment_status,
+            amount: payments.amount,
+          })
+          .from(payments)
+          .where(inArray(payments.order_id, codOrderIds)),
+        db
+          .select({
+            orderId: order_items.order_id,
+            total: sql<string | null>`case
+              when count(*) > 0 and bool_and(${order_items.unit_price_snapshot} is not null)
+              then sum(${order_items.quantity} * ${order_items.unit_price_snapshot})::text
+              else null
+            end`,
+          })
+          .from(order_items)
+          .where(inArray(order_items.order_id, codOrderIds))
+          .groupBy(order_items.order_id),
+      ]);
+      const paymentByOrder = new Map(paymentRows.map((p) => [p.orderId, p]));
+      const totalByOrder = new Map(totalRows.map((t) => [t.orderId, t.total]));
+      codOrders = stops
+        .filter(
+          (s) =>
+            s.stopStatus === "delivered" &&
+            s.paymentArrangement === "PAY_ON_DELIVERY",
+        )
+        .flatMap((s) => {
+          const p = paymentByOrder.get(s.orderId);
+          if (!p || p.status === "PAID") return [];
+          const orderTotal = totalByOrder.get(s.orderId) ?? null;
+          const remaining =
+            orderTotal !== null
+              ? minorUnitsToMoney(
+                  moneyToMinorUnits(orderTotal) > moneyToMinorUnits(p.amount)
+                    ? moneyToMinorUnits(orderTotal) - moneyToMinorUnits(p.amount)
+                    : 0n,
+                )
+              : null;
+          return [
+            {
+              orderId: s.orderId,
+              orderNumber: s.orderNumber,
+              customerName: s.customerName,
+              paymentNumber: p.paymentNumber,
+              paymentVersion: p.version,
+              paymentStatus: p.status,
+              orderTotal,
+              amountPaid: p.amount,
+              remainingAmount: remaining,
+            },
+          ];
+        });
+    }
+
+    return {
+      deliveryId: delivery.id,
+      status: delivery.status,
+      failedStops: stops
+        .filter((s) => s.stopStatus === "failed")
+        .map((s) => ({
+          stopId: s.stopId,
+          orderId: s.orderId,
+          orderNumber: s.orderNumber,
+          customerName: s.customerName,
+          reason: s.failureReason,
+        })),
+      collectedPickups: pickups
+        .filter((p) => p.status === "collected")
+        .map((p) => ({
+          id: p.id,
+          orderNumber: p.orderNumber,
+          customer: p.customer,
+          items: p.items,
+        })),
+      codOrders,
+    };
   }
 
   static async getDeliveryTableRowById(id: number) {
@@ -147,12 +469,31 @@ export abstract class DeliveryService {
       .offset(offset)
       .limit(limit);
 
-    const rows = result.map(async (row) => {
-      const delivery_stop = await db
+    if (!result.length) {
+      return {
+        rows: [],
+        total: total_count.count,
+      };
+    }
+
+    const deliveryIds = result.map((row) => row.delivery_id);
+    const vehicleIds = [
+      ...new Set(
+        result
+          .map((row) => row.vehicle_id)
+          .filter((id): id is number => id !== null && id !== undefined),
+      ),
+    ];
+
+    const [allStops, vehicleWarehouses, pickupsByDelivery] = await Promise.all([
+      db
         .select({
+          delivery_id: deliveries_stops.delivery_id,
           stop_id: deliveries_stops.id,
           return_id: customer_returns.id,
           return_status: customer_returns.status,
+          return_disposition: customer_returns.disposition,
+          return_version: customer_returns.version,
           order_id: orders.id,
           order_number: orders.order_number,
           order_group_id: orders.order_group_id,
@@ -173,41 +514,68 @@ export abstract class DeliveryService {
           customer_returns,
           eq(customer_returns.source_stop_id, deliveries_stops.id),
         )
-        .where(eq(deliveries_stops.delivery_id, row.delivery_id));
+        .where(inArray(deliveries_stops.delivery_id, deliveryIds))
+        .orderBy(asc(deliveries_stops.leg_index), asc(deliveries_stops.id)),
+      vehicleIds.length
+        ? db
+            .select({
+              vehicle_id: vehicles.id,
+              id: warehouses.id,
+              name: warehouses.name,
+              street_address: warehouses.street_address,
+              city: warehouses.city,
+              state: warehouses.state,
+              zip_code: warehouses.zip_code,
+            })
+            .from(vehicles)
+            .innerJoin(warehouses, eq(warehouses.id, vehicles.warehouse_id))
+            .where(inArray(vehicles.id, vehicleIds))
+        : Promise.resolve([]),
+      CustomerReturnService.listByDeliveryIds(deliveryIds),
+    ]);
 
-      const [warehouse] = await db
-        .select({
-          id: warehouses.id,
-          name: warehouses.name,
-          street_address: warehouses.street_address,
-          city: warehouses.city,
-          state: warehouses.state,
-          zip_code: warehouses.zip_code,
-        })
-        .from(vehicles)
-        .innerJoin(warehouses, eq(warehouses.id, vehicles.warehouse_id))
-        .where(eq(vehicles.id, row.vehicle_id ?? -1))
-        .limit(1);
+    const stopsByDelivery = new Map<
+      number,
+      Array<Omit<(typeof allStops)[number], "delivery_id">>
+    >();
+    for (const stop of allStops) {
+      const { delivery_id, ...rest } = stop;
+      const bucket = stopsByDelivery.get(delivery_id) ?? [];
+      bucket.push(rest);
+      stopsByDelivery.set(delivery_id, bucket);
+    }
 
-      return {
-        ...row,
-        is_overdue:
-          row.status === "scheduled" &&
-          isScheduledTripOverdue(row.scheduled_date, row.departure_time),
-        orders: delivery_stop,
-        pickups: await CustomerReturnService.list(undefined, row.delivery_id),
-        warehouse: warehouse ?? null,
-      };
-    });
+    const warehouseByVehicle = new Map(
+      vehicleWarehouses.map(({ vehicle_id, ...warehouse }) => [
+        vehicle_id,
+        warehouse,
+      ]),
+    );
+
+    const rows = result.map((row) => ({
+      ...row,
+      is_overdue:
+        row.status === "scheduled" &&
+        isScheduledTripOverdue(row.scheduled_date, row.departure_time),
+      orders: stopsByDelivery.get(row.delivery_id) ?? [],
+      pickups: pickupsByDelivery.get(row.delivery_id) ?? [],
+      warehouse:
+        row.vehicle_id !== null && row.vehicle_id !== undefined
+          ? (warehouseByVehicle.get(row.vehicle_id) ?? null)
+          : null,
+    }));
 
     return {
-      rows: await Promise.all(rows),
+      rows,
       total: total_count.count,
     };
   }
 
   static async createDelivery(data: DeliveryCreateType, warehouseId?: number) {
-    if (data.delivery_type === "LALAMOVE") throw new WorkflowError("Use the Lalamove quotation and confirmation flow. External couriers cannot be assigned to internal drivers.");
+    const deliveryType = data.delivery_type ?? "INTERNAL";
+    if ((deliveryType as string) !== "INTERNAL") {
+      throw new WorkflowError("Internal delivery schedules only support company delivery. Use Lalamove for external courier bookings.");
+    }
     return await stockTransaction(async (tx) => {
         if (
           !data.order_ids.length ||
@@ -249,7 +617,12 @@ export abstract class DeliveryService {
         if (!driverAccount)
           throw new WorkflowError("Selected driver account is unavailable.");
         const [vehicle] = await tx
-          .select({ id: vehicles.id, warehouse_id: vehicles.warehouse_id })
+          .select({
+            id: vehicles.id,
+            warehouse_id: vehicles.warehouse_id,
+            plate_number: vehicles.plate_number,
+            max_weight_kg: vehicles.max_weight_kg,
+          })
           .from(vehicles)
           .where(
             and(
@@ -261,6 +634,12 @@ export abstract class DeliveryService {
           .for("update");
         if (!vehicle)
           throw new WorkflowError("Selected vehicle is unavailable.");
+        await assertVehiclePayloadCapacity(
+          tx,
+          vehicle,
+          data.order_ids,
+          Boolean(data.allow_overload),
+        );
         const [driverProfile] = await tx
           .select()
           .from(drivers)
@@ -292,6 +671,14 @@ export abstract class DeliveryService {
           );
         }
 
+        await assertNoScheduleConflict(tx, {
+          driverId: data.driver_id,
+          vehicleId: data.vehicle_id,
+          scheduledDate: data.scheduled_date,
+          departureTime: data.scheduled_time,
+          estimatedDurationMinutes: data.estimated_duration_minutes,
+        });
+
         const [delivery] = await tx
           .insert(deliveries)
           .values({
@@ -299,7 +686,8 @@ export abstract class DeliveryService {
             vehicle_id: data.vehicle_id,
             scheduled_date: data.scheduled_date,
             departure_time: data.scheduled_time,
-            delivery_type: data.delivery_type,
+            estimated_duration_minutes: data.estimated_duration_minutes ?? null,
+            delivery_type: deliveryType,
             status: "scheduled",
           })
           .returning({
@@ -339,7 +727,7 @@ export abstract class DeliveryService {
             .update(orders)
             .set({
               status: "SCHEDULED",
-              delivery_method: data.delivery_type,
+              delivery_method: deliveryType,
               version: sql`${orders.version} + 1`,
               updated_at: new Date(),
             })
@@ -393,6 +781,9 @@ export abstract class DeliveryService {
         const [delivery] = await tx
           .select({
             version: deliveries.version,
+            driver_id: deliveries.driver_id,
+            vehicle_id: deliveries.vehicle_id,
+            estimated_duration_minutes: deliveries.estimated_duration_minutes,
           })
           .from(deliveries)
           .where(
@@ -461,12 +852,26 @@ export abstract class DeliveryService {
             message: `Delivery with ID ${data.delivery_id} has been cancelled successfully.`,
           };
         } else if (data.event_type === "RESCHEDULED") {
+          const nextDate = data.scheduled_date;
+          const nextTime = data.departure_time;
+          if (!nextDate || !nextTime) {
+            throw new WorkflowError("Choose a future departure date and time in Asia/Manila.", 400);
+          }
+          await assertNoScheduleConflict(tx, {
+            driverId: delivery.driver_id,
+            vehicleId: delivery.vehicle_id,
+            scheduledDate: nextDate,
+            departureTime: nextTime,
+            estimatedDurationMinutes: delivery.estimated_duration_minutes,
+            excludeDeliveryId: data.delivery_id,
+          });
+
           await tx
             .update(deliveries)
             .set({
               status: "scheduled",
-              scheduled_date: data.scheduled_date,
-              departure_time: data.departure_time,
+              scheduled_date: nextDate,
+              departure_time: nextTime,
               version: delivery.version + 1,
               updated_at: new Date(),
             })
@@ -480,7 +885,7 @@ export abstract class DeliveryService {
 
           await queueDeliveryEventNotifications(tx, data.delivery_id, {
             eventKey: `event:${event.id}`, eventType: "rescheduled", reason: data.reason.trim(),
-            scheduledAt: new Date(toManilaIso(data.scheduled_date!, data.departure_time!)),
+            scheduledAt: new Date(toManilaIso(nextDate, nextTime)),
           });
 
           return {
@@ -501,6 +906,9 @@ export abstract class DeliveryService {
         const [delivery] = await tx
           .select({
             version: deliveries.version,
+            scheduled_date: deliveries.scheduled_date,
+            departure_time: deliveries.departure_time,
+            estimated_duration_minutes: deliveries.estimated_duration_minutes,
           })
           .from(deliveries)
           .where(
@@ -532,7 +940,12 @@ export abstract class DeliveryService {
         if (!driver) throw new WorkflowError("Selected driver is unavailable.");
 
         const [vehicle] = await tx
-          .select({ id: vehicles.id, warehouse_id: vehicles.warehouse_id })
+          .select({
+            id: vehicles.id,
+            warehouse_id: vehicles.warehouse_id,
+            plate_number: vehicles.plate_number,
+            max_weight_kg: vehicles.max_weight_kg,
+          })
           .from(vehicles)
           .where(
             and(
@@ -552,7 +965,10 @@ export abstract class DeliveryService {
         if (!driverProfile || driverProfile.status !== "available")
           throw new WorkflowError("Selected driver is unavailable.");
         const assignedOrders = await tx
-          .select({ warehouseId: orders.warehouse_id })
+          .select({
+            orderId: orders.id,
+            warehouseId: orders.warehouse_id,
+          })
           .from(deliveries_stops)
           .innerJoin(orders, eq(orders.id, deliveries_stops.order_id))
           .where(eq(deliveries_stops.delivery_id, deliveryId));
@@ -566,6 +982,21 @@ export abstract class DeliveryService {
             "Orders, driver and vehicle must remain in the same authorized warehouse.",
             403,
           );
+        await assertVehiclePayloadCapacity(
+          tx,
+          vehicle,
+          assignedOrders.map((o) => o.orderId),
+          Boolean(data.allow_overload),
+        );
+
+        await assertNoScheduleConflict(tx, {
+          driverId: data.driver_id,
+          vehicleId: data.vehicle_id,
+          scheduledDate: delivery.scheduled_date,
+          departureTime: delivery.departure_time,
+          estimatedDurationMinutes: delivery.estimated_duration_minutes,
+          excludeDeliveryId: deliveryId,
+        });
 
         await tx
           .update(deliveries)
@@ -591,12 +1022,16 @@ export abstract class DeliveryService {
       .catch(schedulingConflict);
   }
 
-  static async getTotalActiveDeliveries() {
+  static async getTotalActiveDeliveries(warehouseId?: number) {
     const [total] = await db
       .select({ count: count() })
       .from(deliveries)
+      .innerJoin(vehicles, eq(deliveries.vehicle_id, vehicles.id))
       .where(
-        inArray(deliveries.status, ["scheduled", "in_transit", "returning"]),
+        and(
+          inArray(deliveries.status, ["scheduled", "in_transit", "returning"]),
+          warehouseId === undefined ? undefined : eq(vehicles.warehouse_id, warehouseId),
+        ),
       );
     return total?.count ?? 0;
   }
@@ -835,6 +1270,11 @@ export abstract class DeliveryService {
     warehouseId?: number,
     actorId?: number,
     automatic = false,
+    codCollections?: Array<{
+      paymentNumber: string;
+      amountReceived: number;
+      version: number;
+    }>,
   ) {
     await stockTransaction(async (tx) => {
       const [delivery] = await tx
@@ -847,12 +1287,12 @@ export abstract class DeliveryService {
       if (delivery.status === "completed") return; // idempotent
       if (automatic) {
         if (delivery.status !== "returning") return;
-        const [home] = await tx.select({ latitude: warehouses.latitude, longitude: warehouses.longitude })
+        const [home] = await tx.select({ latitude: warehouses.latitude, longitude: warehouses.longitude, arrival_radius_m: warehouses.arrival_radius_m })
           .from(vehicles).innerJoin(warehouses, eq(warehouses.id, vehicles.warehouse_id))
           .where(and(eq(vehicles.id, delivery.vehicle_id), activeWarehouse()));
         const [fix] = await tx.select().from(vehicle_positions).where(eq(vehicle_positions.vehicle_id, delivery.vehicle_id));
         const [arrivalSetting] = await tx.select({ value: settings.value }).from(settings).where(eq(settings.name, WAREHOUSE_ARRIVAL_SETTING));
-        const radiusM = arrivalSetting ? parseWarehouseArrivalRadius(arrivalSetting.value) : WAREHOUSE_ARRIVAL_RADIUS_M;
+        const radiusM = home?.arrival_radius_m ?? (arrivalSetting ? parseWarehouseArrivalRadius(arrivalSetting.value) : WAREHOUSE_ARRIVAL_RADIUS_M);
         if (!home || !fix || radiusM === null || !isWarehouseArrival(fix, home, delivery.updated_at, Date.now(), radiusM)) return;
         // GPS establishes arrival, but cannot certify failed goods are fit for resale.
         const [unresolved] = await tx.select({ id: deliveries_stops.id }).from(deliveries_stops)
@@ -956,6 +1396,90 @@ export abstract class DeliveryService {
           })
           .where(eq(orders.id, orderId));
       }
+      if (!automatic && codCollections?.length) {
+        const deliveredCodStops = await tx
+          .select({ orderId: deliveries_stops.order_id })
+          .from(deliveries_stops)
+          .innerJoin(orders, eq(orders.id, deliveries_stops.order_id))
+          .where(
+            and(
+              eq(deliveries_stops.delivery_id, deliveryId),
+              eq(deliveries_stops.status, "delivered"),
+              eq(orders.payment_arrangement, "PAY_ON_DELIVERY"),
+            ),
+          );
+        const allowedOrderIds = new Set(deliveredCodStops.map((s) => s.orderId));
+        let recordedAnyPayment = false;
+        for (const item of codCollections) {
+          const receivedMinor = moneyToMinorUnits(item.amountReceived);
+          if (receivedMinor <= 0n) continue;
+          const [payment] = await tx
+            .select()
+            .from(payments)
+            .where(
+              and(
+                eq(payments.payment_number, item.paymentNumber),
+                eq(payments.version, item.version),
+              ),
+            )
+            .for("update");
+          if (!payment || !allowedOrderIds.has(payment.order_id))
+            throw new WorkflowError(
+              `COD payment ${item.paymentNumber} changed or does not belong to a delivered COD stop on this run.`,
+              409,
+            );
+          const [orderTotal] = await tx
+            .select({
+              total: sql<string | null>`case
+                when count(*) > 0 and bool_and(${order_items.unit_price_snapshot} is not null)
+                then sum(${order_items.quantity} * ${order_items.unit_price_snapshot})::text
+                else null
+              end`,
+            })
+            .from(order_items)
+            .where(eq(order_items.order_id, payment.order_id));
+          if (!orderTotal?.total)
+            throw new WorkflowError(
+              `Order total for ${item.paymentNumber} is unverified.`,
+              409,
+            );
+          const totalCostMinor = moneyToMinorUnits(orderTotal.total);
+          const nextPaidMinor = moneyToMinorUnits(payment.amount) + receivedMinor;
+          if (nextPaidMinor > totalCostMinor)
+            throw new WorkflowError(
+              `COD payment for ${item.paymentNumber} exceeds remaining balance.`,
+              409,
+            );
+          await preserveReceiptBaseline(tx, payment);
+          await tx.insert(payment_receipts).values({
+            payment_id: payment.id,
+            amount: minorUnitsToMoney(receivedMinor),
+            received_at: new Date(),
+            kind: "receipt",
+          });
+          await tx
+            .update(payments)
+            .set({
+              amount: minorUnitsToMoney(nextPaidMinor),
+              payment_status:
+                nextPaidMinor >= totalCostMinor ? "PAID" : "PARTIALLY_PAID",
+              received_at: new Date(),
+              updated_at: new Date(),
+              version: payment.version + 1,
+            })
+            .where(eq(payments.id, payment.id));
+          recordedAnyPayment = true;
+        }
+        if (recordedAnyPayment) {
+          await tx.execute(
+            sql`select pg_notify('hyops_resource_changed', ${JSON.stringify({
+              type: "RESOURCE_CHANGED",
+              payload: { resource: "payments", eventId: crypto.randomUUID() },
+            })})`,
+          );
+        }
+      }
+
       await tx
         .update(deliveries)
         .set({
@@ -1005,13 +1529,11 @@ export abstract class DeliveryService {
       if (!delivery) throw new WorkflowError("Delivery not found");
       await assertDeliveryScope(tx, delivery_id, warehouseId);
 
-      await tx
-        .update(deliveries_proof)
-        .set({
-          delivery_id: delivery_id,
-          storage_key: storage_key,
-        })
-        .where(eq(deliveries.id, delivery_id));
+      await tx.insert(deliveries_proof).values({
+        delivery_id: delivery_id,
+        storage_key: storage_key,
+        content_type: "image/webp",
+      });
     });
   }
 }

@@ -3,6 +3,7 @@ import { InventoryService } from "./service";
 import { inventory_stock_status, inventoryModel } from "./model";
 import { AuthUser } from "../auth/schema";
 import { previewReconciliation, reconcileReservations } from "./reconciliation";
+import { StockTransferService } from "./transfers";
 import { staffWarehouse } from "../deliveries/scope";
 
 function parseInventoryIds(value: string | undefined) {
@@ -25,6 +26,69 @@ export const inventoryRoutes = new Elysia({ prefix: "/inventory" })
       detail: { summary: 'Get summary', description: 'GET endpoint for summary in the inventory module.', tags: ['Inventory'] },
     query: t.Object({ warehouse_id: t.Optional(t.Numeric({ minimum: 1 })) }),
   })
+  .get("/transfers", async ({ user }) => StockTransferService.list(await staffWarehouse(user)), {
+    detail: { summary: "List inter-warehouse stock transfers", tags: ["Inventory"] },
+  })
+  .post(
+    "/transfers",
+    async ({ body, user }) =>
+      StockTransferService.create(body, Number(user.sub), await staffWarehouse(user)),
+    {
+      body: t.Object({
+        from_warehouse_id: t.Integer({ minimum: 1 }),
+        to_warehouse_id: t.Integer({ minimum: 1 }),
+        notes: t.Optional(t.String({ maxLength: 500 })),
+        items: t.Array(
+          t.Object({
+            product_variant_id: t.Integer({ minimum: 1 }),
+            quantity: t.Integer({ minimum: 1 }),
+          }),
+          { minItems: 1 },
+        ),
+      }),
+      detail: { summary: "Create an inter-warehouse stock transfer", tags: ["Inventory"] },
+    },
+  )
+  .post(
+    "/transfers/:id/dispatch",
+    async ({ params, body, user }) =>
+      StockTransferService.dispatch(
+        params.id,
+        body.version,
+        Number(user.sub),
+        await staffWarehouse(user),
+      ),
+    {
+      params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+      body: t.Object({ version: t.Integer({ minimum: 1 }) }),
+      detail: { summary: "Dispatch a stock transfer from source warehouse", tags: ["Inventory"] },
+    },
+  )
+  .post(
+    "/transfers/:id/receive",
+    async ({ params, body, user }) =>
+      StockTransferService.receive(
+        params.id,
+        body.version,
+        Number(user.sub),
+        await staffWarehouse(user),
+      ),
+    {
+      params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+      body: t.Object({ version: t.Integer({ minimum: 1 }) }),
+      detail: { summary: "Receive an in-transit stock transfer at destination warehouse", tags: ["Inventory"] },
+    },
+  )
+  .post(
+    "/transfers/:id/cancel",
+    async ({ params, body, user }) =>
+      StockTransferService.cancel(params.id, body.version, await staffWarehouse(user)),
+    {
+      params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+      body: t.Object({ version: t.Integer({ minimum: 1 }) }),
+      detail: { summary: "Cancel a draft stock transfer", tags: ["Inventory"] },
+    },
+  )
   .get("/", async ({ query, set, user }) => {
     const page = query.page ? parseInt(query.page) : 0;
     let limit = query.limit ? parseInt(query.limit) : 10;

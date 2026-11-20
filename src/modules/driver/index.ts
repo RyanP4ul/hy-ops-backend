@@ -1,6 +1,7 @@
 import { CustomerReturnService } from "../deliveries/customer-returns";
 import { DeliveryService } from "../deliveries/service";
 import { proofService } from "./proofs";
+import { vehicleService } from "../vehicles/service";
 import Elysia, { t } from "elysia";
 import { AuthUser } from "../auth/schema";
 import { DriverService } from "./service";
@@ -18,6 +19,30 @@ export function createDriverRoutes(proofs = proofService) { return new Elysia({ 
     params: t.Object({ key: t.String({ format: "uuid" }) }), detail: { tags: ["Drivers"] } })
   .post("/returns/:id/collected", ({ user, params, body }) => CustomerReturnService.collect(Number(user.sub), params.id, body), {
       detail: { summary: 'Create returns by id collected', description: 'POST endpoint for returns by id collected in the drivers module.', tags: ['Drivers'] }, params, body: t.Object({ ...command, tripVersion: t.Optional(t.Integer({ minimum: 1 })) }) })
+  .post("/returns/:id/failed", ({ user, params, body }) => CustomerReturnService.fail(Number(user.sub), params.id, body), {
+      detail: { summary: 'Record failed customer return pickup', description: 'Mark an assigned customer return pickup as failed with a reason so the trip can proceed.', tags: ['Drivers'] }, params, body: t.Object({ ...command, reason: t.String({ minLength: 1, maxLength: 500 }), tripVersion: t.Optional(t.Integer({ minimum: 1 })) }) })
+  .get("/returns/:id/proofs", ({ user, params }) => proofs.listReturnProofs(user, params.id), {
+      detail: { summary: 'List return pickup proofs', description: 'List uploaded photo/signature proofs of collection for a return pickup.', tags: ['Drivers'] }, params })
+  .get("/returns/:id/proofs/:proofId", ({ user, params }) => proofs.downloadReturnProof(user, params.id, params.proofId), {
+      detail: { summary: 'Download return pickup proof', description: 'Download a proof-of-collection file for a return pickup.', tags: ['Drivers'] }, params: t.Object({ id: t.Numeric({ minimum: 1 }), proofId: t.String({ format: "uuid" }) }) })
+  .post("/returns/:id/proofs", ({ user, params, body }) => proofs.uploadReturnProof(Number(user.sub), params.id, body.file, body.kind, body.operationKey), {
+      detail: { summary: 'Upload return pickup proof', description: 'Upload a photo or customer handover signature for a customer return pickup.', tags: ['Drivers'] }, params, body: t.Object({ file: t.File({ maxSize: 5 * 1024 * 1024 }), kind: t.Union([t.Literal("photo"), t.Literal("signature")]), operationKey: t.String({ format: "uuid" }) }) })
+  .post("/vehicle-issues", ({ user, body }) => vehicleService.reportDriverVehicleIssue(Number(user.sub), body), {
+      detail: { summary: 'Report a vehicle issue or odometer reading', description: 'Allow an assigned driver to report a mechanical issue and/or odometer update to warehouse staff.', tags: ['Drivers'] },
+      body: t.Object({
+        delivery_id: t.Optional(t.Integer({ minimum: 1 })),
+        vehicle_id: t.Optional(t.Integer({ minimum: 1 })),
+        maintenance_type: t.Optional(t.Union([
+          t.Literal("preventive"),
+          t.Literal("repair"),
+          t.Literal("tire_battery"),
+          t.Literal("inspection"),
+          t.Literal("breakdown"),
+        ])),
+        title: t.String({ minLength: 1, maxLength: 160 }),
+        description: t.Optional(t.Nullable(t.String({ maxLength: 1000 }))),
+        odometer_km: t.Optional(t.Nullable(t.Numeric({ minimum: 0 }))),
+      }) })
   .get("/profile", ({ user }) => DriverService.profile(Number(user.sub)), { detail: { summary: 'Get profile', description: 'GET endpoint for profile in the drivers module.', tags: ['Drivers'] } })
   .get("/settings", async () => {
     const [setting] = await settingService.getSettingByNames(["mobile_automatic_refresh_interval_ms"]);

@@ -39,12 +39,14 @@ export abstract class InventoryService {
 
   static async getReorderSuggestions(warehouseId: number | null = null) {
     const { threshold } = await this.getSummary(warehouseId);
+    const effectiveThreshold = sql<number>`coalesce(${inventory.reorder_point}, ${threshold})`;
     const rows = await db.select({ id: inventory.id, sku: product_variants.sku, warehouse: warehouses.name,
       available: sql<number>`${inventory.quantity} - ${inventory.reserved}`, unit: product_variants.unit,
-      suggested: sql<number>`greatest(${threshold} + 1 - (${inventory.quantity} - ${inventory.reserved}), 0)` })
+      reorder_point: effectiveThreshold,
+      suggested: sql<number>`greatest(${effectiveThreshold} + 1 - (${inventory.quantity} - ${inventory.reserved}), 0)` })
       .from(inventory).innerJoin(product_variants, eq(product_variants.id, inventory.product_variant_id))
       .innerJoin(warehouses, eq(warehouses.id, inventory.warehouse_id))
-      .where(and(activeInventory(), lte(sql`${inventory.quantity} - ${inventory.reserved}`, threshold), warehouseId === null ? undefined : eq(inventory.warehouse_id, warehouseId))).orderBy(inventory.id);
+      .where(and(activeInventory(), lte(sql`${inventory.quantity} - ${inventory.reserved}`, effectiveThreshold), warehouseId === null ? undefined : eq(inventory.warehouse_id, warehouseId))).orderBy(inventory.id);
     return { threshold, rows };
   }
 
@@ -53,9 +55,10 @@ export abstract class InventoryService {
     const configured = Number(setting?.value ?? 10);
     const threshold = Number.isSafeInteger(configured) && configured >= 0 ? configured : 10;
     const available = sql`${inventory.quantity} - ${inventory.reserved}`;
+    const effectiveThreshold = sql`coalesce(${inventory.reorder_point}, ${threshold})`;
     const [summary] = await db.select({
       skus: sql<number>`count(distinct ${inventory.product_variant_id})`.mapWith(Number),
-      low: sql<number>`count(*) filter (where ${available} > 0 and ${available} <= ${threshold})`.mapWith(Number),
+      low: sql<number>`count(*) filter (where ${available} > 0 and ${available} <= ${effectiveThreshold})`.mapWith(Number),
       out: sql<number>`count(*) filter (where ${available} <= 0)`.mapWith(Number),
       reserved: sql<number>`coalesce(sum(${inventory.reserved}), 0)`.mapWith(Number),
       available: sql<number>`coalesce(sum(${available}), 0)`.mapWith(Number),
@@ -73,6 +76,7 @@ export abstract class InventoryService {
         warehouse_name: warehouses.name,
         reserved: inventory.reserved,
         quantity: inventory.quantity,
+        reorder_point: inventory.reorder_point,
         price: product_variants.price,
         version: inventory.version,
         is_active: inventory.is_active,
@@ -129,7 +133,7 @@ export abstract class InventoryService {
           low_stock_threshold = Number.isSafeInteger(configured) && configured >= 0 ? configured : 10;
           stockStatusQuery = and(
             gt(sql`${inventory.quantity} - ${inventory.reserved}`, 0),
-            lte(sql`${inventory.quantity} - ${inventory.reserved}`, low_stock_threshold),
+            lte(sql`${inventory.quantity} - ${inventory.reserved}`, sql`coalesce(${inventory.reorder_point}, ${low_stock_threshold})`),
           );
         }
         break;
@@ -194,6 +198,7 @@ export abstract class InventoryService {
         warehouse_name: warehouses.name,
         reserved: inventory.reserved,
         quantity: inventory.quantity,
+        reorder_point: inventory.reorder_point,
         price: product_variants.price,
         version: inventory.version,
         is_active: inventory.is_active,
@@ -223,6 +228,7 @@ export abstract class InventoryService {
         id: inventory.id,
         quantity: inventory.quantity,
         reserved: inventory.reserved,
+        reorder_point: inventory.reorder_point,
         warehouse_id: inventory.warehouse_id,
         warehouse_name: warehouses.name,
         product_variant_id: inventory.product_variant_id,
@@ -238,7 +244,7 @@ export abstract class InventoryService {
     return result;
   }
 
-  static async createInventory(data: { warehouse_id: number; product_variant_id: number; quantity: number }) {
+  static async createInventory(data: { warehouse_id: number; product_variant_id: number; quantity: number; reorder_point?: number | null }) {
     if (!Number.isSafeInteger(data.quantity) || data.quantity < 0) throw new WorkflowError("Quantity must be a non-negative integer.");
     return stockTransaction(async (tx) => {
       const [variant] = await tx.select({ product_id: product_variants.product_id }).from(product_variants)
@@ -248,7 +254,7 @@ export abstract class InventoryService {
       const [warehouse] = await tx.select().from(warehouses).where(and(eq(warehouses.id, data.warehouse_id), activeWarehouse())).for("share");
       if (!product || !warehouse) throw new WorkflowError("Choose an active product and warehouse.");
       const now = Math.floor(Date.now() / 1000);
-      const result = await tx.insert(inventory).values({ ...data, product_id: variant.product_id, created_at: now, updated_at: now })
+      const result = await tx.insert(inventory).values({ ...data, product_id: variant.product_id, reorder_point: data.reorder_point ?? null, created_at: now, updated_at: now })
         .onConflictDoNothing().returning();
       if (!result.length) throw new WorkflowError("Inventory already exists for this variant and warehouse.");
       if (data.quantity > 0) await tx.insert(stock_movements).values({ inventory_id: result[0].id, kind: "opening", quantity_delta: data.quantity, reserved_delta: 0, quantity_after: data.quantity, reserved_after: 0, reason: "Opening inventory balance" });
@@ -256,7 +262,7 @@ export abstract class InventoryService {
     });
   }
 
-  static async updateInventory(inventory_id: number, data: { warehouse_id: number; product_variant_id: number; quantity: number; reserved: number; version: number; reason?: string }, actorId?: number) {
+  static async updateInventory(inventory_id: number, data: { warehouse_id: number; product_variant_id: number; quantity: number; reserved: number; version: number; reorder_point?: number | null; movement_kind?: "adjustment" | "inbound_receipt" | "damage" | "cycle_count"; reason?: string }, actorId?: number) {
     return stockTransaction(async (tx) => {
       const [current] = await tx.select().from(inventory).where(eq(inventory.id, inventory_id)).for("update");
       if (!current || current.version !== data.version) throw new WorkflowError("Inventory not found or version mismatch.");
@@ -268,8 +274,13 @@ export abstract class InventoryService {
       if (data.reserved !== current.reserved) throw new WorkflowError("Reserved units are managed by orders and cannot be edited directly.");
       if (!Number.isSafeInteger(data.quantity) || data.quantity < current.reserved) throw new WorkflowError("On-hand quantity cannot be less than reserved units.");
       if (data.quantity !== current.quantity && !data.reason?.trim()) throw new WorkflowError("A reason is required for a stock adjustment.");
-      if (data.quantity !== current.quantity) await tx.insert(stock_movements).values({ inventory_id, actor_id: actorId ?? null, kind: "adjustment", quantity_delta: data.quantity - current.quantity, reserved_delta: 0, quantity_after: data.quantity, reserved_after: current.reserved, reason: data.reason?.trim() ?? "" });
-      await tx.update(inventory).set({ quantity: data.quantity, version: current.version + 1, updated_at: Math.floor(Date.now() / 1000) })
+      if (data.quantity !== current.quantity) await tx.insert(stock_movements).values({ inventory_id, actor_id: actorId ?? null, kind: data.movement_kind ?? "adjustment", quantity_delta: data.quantity - current.quantity, reserved_delta: 0, quantity_after: data.quantity, reserved_after: current.reserved, reason: data.reason?.trim() ?? "" });
+      await tx.update(inventory).set({
+        quantity: data.quantity,
+        reorder_point: data.reorder_point === undefined ? current.reorder_point : data.reorder_point,
+        version: current.version + 1,
+        updated_at: Math.floor(Date.now() / 1000),
+      })
         .where(eq(inventory.id, inventory_id));
       return { message: `Inventory with ID ${inventory_id} updated successfully.` };
     });

@@ -11,8 +11,12 @@ export const dashboardRoutes = new Elysia({
   detail: { tags: ["Dashboard"] },
 })
 .decorate("user", {} as AuthUser)
-.get("/exceptions", async () => {
-  const [operations, stock] = await Promise.all([DashboardService.getExceptions(), InventoryService.getSummary()]);
+.get("/exceptions", async ({ user }) => {
+  const warehouseId = await staffWarehouse(user);
+  const [operations, stock] = await Promise.all([
+    DashboardService.getExceptions(warehouseId),
+    InventoryService.getSummary(warehouseId ?? null),
+  ]);
   return { ...operations, lowStock: stock.low, outOfStock: stock.out };
 }, {
   detail: {
@@ -23,20 +27,31 @@ export const dashboardRoutes = new Elysia({
 })
 .get(
   "/stats",
-  async ({ set, user }) => {
-    const monthly_revenue = await DashboardService.getRevenueByMonth();
-    const daily_sales = await DashboardService.getSalesByDay();
-    const active_deliveries = await DashboardService.getActiveDeliveries();
-    const upcoming_deliveries =
-      await DashboardService.getUpcomingDeliveries();
-    const delivery_calendar = await DashboardService.getDeliveryCalendar(await staffWarehouse(user));
-    const top_selling_products =
-      await DashboardService.getTopSellingProducts();
-    const top_customers = await DashboardService.getTopCustomers();
-    const total_orders = await OrderService.getTotalOrders();
-    const total_active_deliveries =
-      await DeliveryService.getTotalActiveDeliveries();
-    const total_pending = await OrderService.getTotalPendingOrders();
+  async ({ user }) => {
+    const warehouseId = await staffWarehouse(user);
+    const [
+      monthly_revenue,
+      daily_sales,
+      active_deliveries,
+      upcoming_deliveries,
+      delivery_calendar,
+      top_selling_products,
+      top_customers,
+      total_orders,
+      total_active_deliveries,
+      total_pending,
+    ] = await Promise.all([
+      DashboardService.getRevenueByMonth(warehouseId),
+      DashboardService.getSalesByDay(warehouseId),
+      DashboardService.getActiveDeliveries(warehouseId),
+      DashboardService.getUpcomingDeliveries(warehouseId),
+      DashboardService.getDeliveryCalendar(warehouseId),
+      DashboardService.getTopSellingProducts(warehouseId),
+      DashboardService.getTopCustomers(warehouseId),
+      OrderService.getTotalOrders(warehouseId),
+      DeliveryService.getTotalActiveDeliveries(warehouseId),
+      OrderService.getTotalPendingOrders(warehouseId),
+    ]);
 
     return {
       revenue: monthly_revenue[monthly_revenue.length - 1]?.revenue ?? 0,
@@ -47,9 +62,9 @@ export const dashboardRoutes = new Elysia({
       delivery_calendar,
       top_selling_products,
       top_customers,
-      total_orders: total_orders,
-      total_active_deliveries: total_active_deliveries,
-      total_pending: total_pending,
+      total_orders,
+      total_active_deliveries,
+      total_pending,
     };
   },
   {

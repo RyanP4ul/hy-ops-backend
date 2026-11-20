@@ -12,6 +12,9 @@ export const lalamoveWebhookRoutes = new Elysia().post("/webhooks/lalamove", asy
   if (raw.length > 262144) { set.status = 413; return { message: "Payload too large." }; }
   let value: unknown;
   try { value = JSON.parse(raw); } catch { set.status = 400; return { message: "Invalid JSON." }; }
+  if (value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0) {
+    return { received: true }; // Lalamove verification probe sends an empty JSON object {}.
+  }
   if (!verifyLalamoveWebhook(value, process.env.LALAMOVE_API_KEY ?? "", process.env.LALAMOVE_API_SECRET ?? "", lalamoveCallback().path)) {
     set.status = 401; return { message: "Invalid provider signature." };
   }

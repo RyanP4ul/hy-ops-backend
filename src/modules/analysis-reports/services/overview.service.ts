@@ -13,6 +13,31 @@ export async function getOverview(f: Filters, now = Date.now()): Promise<Overvie
   const revenueRows = m.live
     .filter((o) => o.total !== null)
     .map((o) => ({ at: o.at, v: o.total ?? 0 }));
+  const allHaveCost = m.live.length > 0 && m.live.every((o) => o.costTotal !== null && o.costTotal !== undefined);
+  const cogs = allHaveCost
+    ? sumMoney(m.live, (o) => o.costTotal ?? 0)
+    : m.live.length === 0
+      ? 0
+      : null;
+  const grossProfit =
+    m.revenue !== null && cogs !== null
+      ? Math.round((m.revenue - cogs) * 100) / 100
+      : null;
+  const grossMarginPct =
+    m.revenue !== null && m.revenue > 0 && grossProfit !== null
+      ? Math.round((grossProfit / m.revenue) * 1000) / 10
+      : null;
+  const seenDeliveries = new Set<number>();
+  let deliveryExpenses = 0;
+  for (const s of stops) {
+    if (!seenDeliveries.has(s.delivery.id)) {
+      seenDeliveries.add(s.delivery.id);
+      if (s.delivery.costStatus !== "rejected") {
+        deliveryExpenses += s.delivery.cost;
+      }
+    }
+  }
+  deliveryExpenses = Math.round(deliveryExpenses * 100) / 100;
 
   return {
     kpis: {
@@ -22,6 +47,10 @@ export async function getOverview(f: Filters, now = Date.now()): Promise<Overvie
       outstanding: m.outstanding,
       delivered: dm.delivered, deliveredDelta: delta(dm.delivered, pdm.delivered),
       failureRate: dm.rate,
+      cogs,
+      grossProfit,
+      grossMarginPct,
+      deliveryExpenses,
     },
     trend: Object.fromEntries(GRAINS.map((g) => [g, trend(revenueRows, g)])) as OverviewResponse["trend"],
     ordersByStatus: groupSum(orders, (o) => o.status, () => 1), // includes cancelled

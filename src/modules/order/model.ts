@@ -4,7 +4,7 @@ export const orderSchema = t.Object({
   warehouse_id: t.Numeric({ minimum: 1 }),
   customer_id: t.Numeric({ minimum: 1 }),
   notes: t.Optional(t.String()),
-  delivery_type: t.Optional(t.Union([t.Literal("INTERNAL"), t.Literal("LALAMOVE"), t.Literal("PICKUP")])),
+  delivery_type: t.Optional(t.Union([t.Literal("INTERNAL"), t.Literal("LALAMOVE")])),
   payment_type: t.Optional(t.String({ minLength: 1, maxLength: 100, pattern: "\\S" })),
   payment_method: t.Union([
     t.Literal("BANK_TRANSFER"),
@@ -58,7 +58,7 @@ export const orderEditSchema = t.Object({
   version: t.Integer({ minimum: 1 }),
   notes: t.Optional(t.String({ maxLength: 2000 })),
   delivery_type: t.Optional(
-    t.Union([t.Literal("INTERNAL"), t.Literal("LALAMOVE"), t.Literal("PICKUP")]),
+    t.Union([t.Literal("INTERNAL"), t.Literal("LALAMOVE")]),
   ),
   customer_address_id: t.Optional(t.Numeric({ minimum: 1 })),
   payment_arrangement: t.Optional(

@@ -38,6 +38,7 @@ import { lalamoveRoutes } from "./modules/lalamove";
 import { lalamoveWebhookRoutes } from "./modules/lalamove/webhook";
 import { startLalamoveWorker } from "./modules/lalamove/reconciliation-worker";
 import { orderRoutes } from "./modules/order";
+import { OrderService } from "./modules/order/service";
 import { deliveryScheduleRoutes } from "./modules/delivery-schedule";
 import { deliveriesRoutes } from "./modules/deliveries";
 import { calendarRoutes } from "./modules/calendar";
@@ -183,6 +184,18 @@ export function createApp(
         }
       })
       .use(authRoutes)
+      .get(
+        "/public/track/:token",
+        ({ params }) => OrderService.getPublicTracking(params.token),
+        {
+          params: t.Object({ token: t.String({ format: "uuid" }) }),
+          detail: {
+            summary: "Public read-only order tracking",
+            description: "Retrieve sanitized order & delivery status using an order tracking UUID.",
+            tags: ["Orders"],
+          },
+        },
+      )
       .use(options.externalIntegrations === false ? new Elysia() : lalamoveWebhookRoutes)
       .onBeforeHandle(({ request, set }) => {
         if (

@@ -111,6 +111,9 @@ export async function findDeliveries(
         allowance: deliveries_expenses.delivery_allowance,
         fuel: deliveries_expenses.fuel,
         toll: deliveries_expenses.toll,
+        actualAllowance: deliveries_expenses.actual_delivery_allowance,
+        actualFuel: deliveries_expenses.actual_fuel,
+        actualToll: deliveries_expenses.actual_toll,
         status: deliveries_expenses.status,
       })
       .from(deliveries_expenses)
@@ -121,6 +124,14 @@ export async function findDeliveries(
   const expenseByDelivery = new Map(expenses.map((e) => [e.deliveryId, e])); // if a delivery has several expense rows, the newest wins
   return rows.map((d) => {
     const e = expenseByDelivery.get(d.id);
+    const settledCost =
+      e && e.status === "approved"
+        ? Number(e.actualAllowance ?? e.allowance) +
+          Number(e.actualFuel ?? e.fuel) +
+          Number(e.actualToll ?? e.toll)
+        : e
+          ? Number(e.allowance) + Number(e.fuel) + Number(e.toll)
+          : 0;
     return {
       id: d.id,
       date: d.date,
@@ -130,7 +141,7 @@ export async function findDeliveries(
       vehicle: d.vehicle,
       driver: d.driver,
       warehouseId: d.warehouseId,
-      cost: e ? Number(e.allowance) + Number(e.fuel) + Number(e.toll) : 0,
+      cost: settledCost,
       costStatus: (e?.status ?? null) as ExpenseStatus | null,
     };
   });

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { db } from "../../db";
-import { deliveries, deliveries_stops, driver_stop_proofs } from "../../db/schema";
+import { customer_returns, deliveries, deliveries_stops, driver_return_proofs, driver_stop_proofs } from "../../db/schema";
 import { r2, r2Bucket } from "../../lib/storage/r2";
 import { WorkflowError } from "../../utils/workflow-error";
 import { staffWarehouse, assertDeliveryScope } from "../deliveries/scope";
@@ -21,6 +21,7 @@ const storage: ProofStorage = {
 };
 type Actor = { sub: unknown; role: unknown };
 const metadata = { id: driver_stop_proofs.id, kind: driver_stop_proofs.kind, contentType: driver_stop_proofs.content_type, byteSize: driver_stop_proofs.byte_size, createdAt: driver_stop_proofs.created_at };
+const returnMetadata = { id: driver_return_proofs.id, kind: driver_return_proofs.kind, contentType: driver_return_proofs.content_type, byteSize: driver_return_proofs.byte_size, createdAt: driver_return_proofs.created_at };
 
 export class ProofService {
   constructor(private readonly store: ProofStorage = storage) {}
@@ -88,6 +89,191 @@ export class ProofService {
       });
     } catch (error) {
       if (written) { try { await this.store.delete(written); } catch { console.error("Driver proof cleanup failed; private orphan requires storage cleanup."); } }
+      throw error;
+    }
+  }
+
+  private async authorizeReturn(actor: Actor, returnId: number) {
+    const [task] = await db
+      .select()
+      .from(customer_returns)
+      .where(eq(customer_returns.id, returnId));
+    if (!task) throw new WorkflowError("Return pickup not found.", 404);
+    if (actor.role === "driver") {
+      if (!task.assigned_delivery_id) throw new WorkflowError("Return pickup not found.", 404);
+      const [run] = await db
+        .select()
+        .from(deliveries)
+        .where(eq(deliveries.id, task.assigned_delivery_id));
+      if (!run || run.delivery_type === "LALAMOVE" || run.driver_id !== Number(actor.sub)) {
+        throw new WorkflowError("Return pickup not found.", 404);
+      }
+      return { task, run };
+    }
+    const warehouse = await staffWarehouse(actor);
+    if (warehouse !== undefined && task.warehouse_id !== warehouse) {
+      throw new WorkflowError("Return pickup is outside your assigned warehouse.", 403);
+    }
+    return { task, run: null };
+  }
+
+  async listReturnProofs(actor: Actor, returnId: number) {
+    await this.authorizeReturn(actor, returnId);
+    return db
+      .select(returnMetadata)
+      .from(driver_return_proofs)
+      .where(eq(driver_return_proofs.return_id, returnId))
+      .orderBy(asc(driver_return_proofs.created_at), asc(driver_return_proofs.id));
+  }
+
+  async downloadReturnProof(actor: Actor, returnId: number, id: string) {
+    await this.authorizeReturn(actor, returnId);
+    const [proof] = await db
+      .select()
+      .from(driver_return_proofs)
+      .where(and(eq(driver_return_proofs.id, id), eq(driver_return_proofs.return_id, returnId)));
+    if (!proof) throw new WorkflowError("Proof not found.", 404);
+    const bytes = await this.store.get(proof.storage_key);
+    return new Response(bytes as BodyInit, {
+      headers: {
+        "Content-Type": proof.content_type,
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": `inline; filename="${proof.id}.${proof.kind === "signature" ? "png" : "webp"}"`,
+      },
+    });
+  }
+
+  async uploadReturnProof(
+    actorId: number,
+    returnId: number,
+    file: File,
+    kind: "photo" | "signature",
+    operationKey: string,
+  ) {
+    if (!file.size || file.size > 5 * 1024 * 1024) {
+      throw new WorkflowError("Proof must be between 1 byte and 5 MB.", 400);
+    }
+    const input = Buffer.from(await file.arrayBuffer());
+    const requestHash = commandHash("return_proof", returnId, {
+      kind,
+      sha256: createHash("sha256").update(input).digest("hex"),
+    });
+    let data: Buffer;
+    try {
+      const image = sharp(input, { limitInputPixels: 20000000, animated: false });
+      const info = await image.metadata();
+      if (!["jpeg", "png", "webp"].includes(info.format ?? "") || (info.pages ?? 1) > 1) {
+        throw new Error("Invalid image");
+      }
+      const normalized = image.rotate().resize({
+        width: 2048,
+        height: 2048,
+        fit: "inside",
+        withoutEnlargement: true,
+      });
+      data =
+        kind === "signature"
+          ? await normalized.png().toBuffer()
+          : await normalized.webp({ quality: 85 }).toBuffer();
+    } catch {
+      throw new WorkflowError("Upload a valid JPEG, PNG, or WebP image.", 400);
+    }
+    if (data.length > 5 * 1024 * 1024) {
+      throw new WorkflowError("Normalized proof exceeds the 5 MB limit.", 400);
+    }
+    const hash = createHash("sha256").update(data).digest("hex");
+    const contentType = kind === "signature" ? "image/png" : "image/webp";
+    let written: string | undefined;
+    try {
+      return await db.transaction(async (tx) => {
+        const receipt = await replayReceipt(tx, actorId, operationKey, requestHash);
+        const [task] = await tx
+          .select()
+          .from(customer_returns)
+          .where(eq(customer_returns.id, returnId))
+          .for("update");
+        if (!task || !task.assigned_delivery_id) {
+          throw new WorkflowError("Assigned return pickup not found.", 404);
+        }
+        const [run] = await tx
+          .select()
+          .from(deliveries)
+          .where(eq(deliveries.id, task.assigned_delivery_id))
+          .for("update");
+        if (!run || run.driver_id !== actorId) {
+          throw new WorkflowError("Assigned return pickup not found.", 404);
+        }
+        if (receipt) return receipt;
+        const [existing] = await tx
+          .select()
+          .from(driver_return_proofs)
+          .where(eq(driver_return_proofs.operation_key, operationKey));
+        if (existing) {
+          if (
+            existing.actor_id !== actorId ||
+            existing.return_id !== returnId ||
+            existing.sha256 !== hash ||
+            existing.kind !== kind
+          ) {
+            throw new WorkflowError("Proof operation key was already used for another upload.");
+          }
+          return {
+            id: existing.id,
+            kind: existing.kind,
+            contentType: existing.content_type,
+            byteSize: existing.byte_size,
+            createdAt: existing.created_at,
+          };
+        }
+        if (!["in_transit", "returning", "completed"].includes(run.status)) {
+          throw new WorkflowError("Return proofs require a dispatched assignment.");
+        }
+        const [amount] = await tx
+          .select({ total: count() })
+          .from(driver_return_proofs)
+          .where(
+            and(
+              eq(driver_return_proofs.return_id, returnId),
+              eq(driver_return_proofs.kind, kind),
+            ),
+          );
+        if (amount.total >= (kind === "signature" ? 1 : 3)) {
+          throw new WorkflowError("This return pickup already has the maximum proofs of this kind.");
+        }
+        const id = crypto.randomUUID(),
+          key = `driver-return-proofs/${id}`;
+        written = key;
+        await this.store.put(key, data, contentType);
+        const [record] = await tx
+          .insert(driver_return_proofs)
+          .values({
+            id,
+            return_id: returnId,
+            actor_id: actorId,
+            operation_key: operationKey,
+            kind,
+            storage_key: key,
+            content_type: contentType,
+            sha256: hash,
+            byte_size: data.length,
+          })
+          .returning(returnMetadata);
+        return saveReceipt(tx, actorId, operationKey, requestHash, {
+          ...record,
+          deliveryId: run.id,
+          entityId: returnId,
+          tripVersion: run.version,
+        });
+      });
+    } catch (error) {
+      if (written) {
+        try {
+          await this.store.delete(written);
+        } catch {
+          console.error("Driver return proof cleanup failed; private orphan requires storage cleanup.");
+        }
+      }
       throw error;
     }
   }

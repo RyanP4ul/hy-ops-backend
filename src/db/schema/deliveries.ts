@@ -10,6 +10,7 @@ import {
   time,
   timestamp,
   unique,
+  uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
 import { users } from "./users";
@@ -68,6 +69,7 @@ export const deliveries = pgTable(
       }),
     scheduled_date: date().notNull(),
     departure_time: time().notNull(),
+    estimated_duration_minutes: integer("estimated_duration_minutes"),
     delivery_type: delivery_type("delivery_type").notNull().default("INTERNAL"),
     status: deliveries_status().notNull().default("scheduled"),
     version: integer().notNull().default(1),
@@ -80,11 +82,12 @@ export const deliveries = pgTable(
     updated_at: timestamp({ withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    unique("unique_delivery").on(
-      table.driver_id,
-      table.scheduled_date,
-      table.departure_time,
-    ),
+    uniqueIndex("unique_active_driver_slot")
+      .on(table.driver_id, table.scheduled_date, table.departure_time)
+      .where(sql`${table.status} <> 'cancelled'`),
+    uniqueIndex("unique_active_vehicle_slot")
+      .on(table.vehicle_id, table.scheduled_date, table.departure_time)
+      .where(sql`${table.status} <> 'cancelled'`),
   ],
 );
 
@@ -150,6 +153,24 @@ export const deliveries_expenses = pgTable("deliveries_expenses", {
     precision: 12,
     scale: 2,
   }).notNull(),
+  actual_delivery_allowance: numeric("actual_delivery_allowance", {
+    precision: 12,
+    scale: 2,
+  }),
+  actual_fuel: numeric("actual_fuel", {
+    precision: 12,
+    scale: 2,
+  }),
+  actual_toll: numeric("actual_toll", {
+    precision: 12,
+    scale: 2,
+  }),
+  settlement_notes: text("settlement_notes"),
+  settled_by: integer("settled_by").references(() => users.id, {
+    onDelete: "restrict",
+  }),
+  settled_at: timestamp("settled_at", { withTimezone: true }),
+  version: integer("version").notNull().default(1),
   status: deliveries_expeneses_status_enum("status")
     .notNull()
     .default("pending"),

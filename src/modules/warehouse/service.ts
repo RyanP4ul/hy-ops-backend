@@ -8,13 +8,15 @@ import { and, count, desc, asc, eq, ilike, or } from "drizzle-orm";
 import { logger } from "../../utils/logger";
 import {
   archives,
+  deliveries,
   inventory,
   vehicles,
   drivers,
   staffs,
   orders,
+  settings,
 } from "@/db/schema";
-import { inArray } from "drizzle-orm";
+import { inArray, sql } from "drizzle-orm";
 import { WarehouseType } from "./model";
 
 type WarehouseSortField = "id" | "name";
@@ -277,6 +279,76 @@ export abstract class WarehouseService {
         message: "Warehouse updated successfully",
       };
     });
+  }
+
+  static async getWarehouseOverview(id: number) {
+    const warehouse = await this.getWarehouseById(id);
+    if (!warehouse) throw new WorkflowError("Warehouse not found.", 404);
+
+    const lowSetting = await db.query.settings.findFirst({
+      where: eq(settings.name, "low_stock_threshold"),
+    });
+    const globalThreshold = Number(lowSetting?.value ?? 10);
+    const threshold =
+      Number.isSafeInteger(globalThreshold) && globalThreshold >= 0
+        ? globalThreshold
+        : 10;
+
+    const [
+      [vehicleStats],
+      [driverStats],
+      [staffStats],
+      [stockStats],
+      [activeDeliveryStats],
+    ] = await Promise.all([
+      db
+        .select({
+          total: count(),
+          available: sql<number>`count(*) filter (where ${vehicles.status} = 'available')`.mapWith(Number),
+          on_delivery: sql<number>`count(*) filter (where ${vehicles.status} = 'on_delivery')`.mapWith(Number),
+          maintenance: sql<number>`count(*) filter (where ${vehicles.status} = 'maintenance')`.mapWith(Number),
+        })
+        .from(vehicles)
+        .where(and(eq(vehicles.warehouse_id, id), eq(vehicles.is_archived, false))),
+      db
+        .select({
+          total: count(),
+          available: sql<number>`count(*) filter (where ${drivers.status} = 'available')`.mapWith(Number),
+          on_delivery: sql<number>`count(*) filter (where ${drivers.status} = 'on_delivery')`.mapWith(Number),
+        })
+        .from(drivers)
+        .where(eq(drivers.warehouse_id, id)),
+      db
+        .select({ total: count() })
+        .from(staffs)
+        .where(eq(staffs.warehouse_id, id)),
+      db
+        .select({
+          total_skus: count(),
+          low_stock: sql<number>`count(*) filter (where (${inventory.quantity} - ${inventory.reserved}) > 0 and (${inventory.quantity} - ${inventory.reserved}) <= coalesce(${inventory.reorder_point}, ${threshold}))`.mapWith(Number),
+          out_of_stock: sql<number>`count(*) filter (where (${inventory.quantity} - ${inventory.reserved}) <= 0)`.mapWith(Number),
+        })
+        .from(inventory)
+        .where(and(eq(inventory.warehouse_id, id), eq(inventory.is_archived, false))),
+      db
+        .select({
+          scheduled: sql<number>`count(*) filter (where ${deliveries.status} = 'scheduled')`.mapWith(Number),
+          in_transit: sql<number>`count(*) filter (where ${deliveries.status} = 'in_transit')`.mapWith(Number),
+          returning: sql<number>`count(*) filter (where ${deliveries.status} = 'returning')`.mapWith(Number),
+        })
+        .from(deliveries)
+        .innerJoin(vehicles, eq(vehicles.id, deliveries.vehicle_id))
+        .where(eq(vehicles.warehouse_id, id)),
+    ]);
+
+    return {
+      warehouse,
+      vehicles: vehicleStats ?? { total: 0, available: 0, on_delivery: 0, maintenance: 0 },
+      drivers: driverStats ?? { total: 0, available: 0, on_delivery: 0 },
+      staff_count: staffStats?.total ?? 0,
+      inventory: stockStats ?? { total_skus: 0, low_stock: 0, out_of_stock: 0 },
+      deliveries: activeDeliveryStats ?? { scheduled: 0, in_transit: 0, returning: 0 },
+    };
   }
 
   static async deleteWarehouse(id: number, version: number) {

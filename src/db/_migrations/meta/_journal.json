@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1795004616084,
+      "tag": "0000_nappy_sleepwalker",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1795100000000,
+      "tag": "0001_p0_hardening",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795200000000,
+      "tag": "0002_p1_operational_loops",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1795300000000,
+      "tag": "0003_p2_erp_enhancements",
+      "breakpoints": true
+    }
+  ]
+}

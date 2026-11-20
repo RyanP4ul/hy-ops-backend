@@ -37,8 +37,16 @@ export function mayAccess(role: string, method: string, pathname: string): boole
   if (role === "admin") return true;
   if (!["staff", "driver", "customer"].includes(role)) return false;
   if (path === "/ws" || (method === "GET" && path === "/notifications") || (method === "POST" && (path === "/notifications/mark-all-read" || /^\/notifications\/\d+\/read$/.test(path)))) return true;
-  if (role === "driver") return (method === "GET" && /^\/driver\/sync\/(capabilities|operations\/[0-9a-f-]{36})$/i.test(path)) || (method === "POST" && /^\/driver\/returns\/\d+\/collected$/.test(path)) || (method === "POST" && /^\/driver\/trips\/\d+\/start$/.test(path)) ||     ((method === "GET" || method === "POST") && /^\/driver\/stops\/\d+\/proofs$/.test(path)) ||
-    (method === "GET" && /^\/driver\/stops\/\d+\/proofs\/[0-9a-f-]{36}$/i.test(path)) || (method === "GET" && /^\/driver\/(profile|settings|trips(?:\/\d+)?|history)$/.test(path)) || (method === "POST" && /^\/driver\/stops\/\d+\/(delivered|failed|plan)$/.test(path));
+  if (role === "driver") return (method === "GET" && /^\/driver\/sync\/(capabilities|operations\/[0-9a-f-]{36})$/i.test(path))
+    || (method === "POST" && /^\/driver\/returns\/\d+\/(collected|failed)$/.test(path))
+    || ((method === "GET" || method === "POST") && /^\/driver\/returns\/\d+\/proofs$/.test(path))
+    || (method === "GET" && /^\/driver\/returns\/\d+\/proofs\/[0-9a-f-]{36}$/i.test(path))
+    || (method === "POST" && path === "/driver/vehicle-issues")
+    || (method === "POST" && /^\/driver\/trips\/\d+\/start$/.test(path))
+    || ((method === "GET" || method === "POST") && /^\/driver\/stops\/\d+\/proofs$/.test(path))
+    || (method === "GET" && /^\/driver\/stops\/\d+\/proofs\/[0-9a-f-]{36}$/i.test(path))
+    || (method === "GET" && /^\/driver\/(profile|settings|trips(?:\/\d+)?|history)$/.test(path))
+    || (method === "POST" && /^\/driver\/stops\/\d+\/(delivered|failed|plan)$/.test(path));
   if (role !== "staff") return false;
   if (path === "/lalamove/webhook/register") return false;
   if (method === "GET" && ["/users/customers", "/users/drivers", "/settings", "/settings/names"].includes(path)) return true;

@@ -91,4 +91,85 @@ export const vehicleRoutes = new Elysia({ prefix: "/vehicles" })
     );
 
     return result;
-  }, { detail: { summary: 'Get cb', description: 'GET endpoint for cb in the vehicles module.', tags: ['Vehicles'] } });
+  }, { detail: { summary: 'Get cb', description: 'GET endpoint for cb in the vehicles module.', tags: ['Vehicles'] } })
+  .get(
+    "/:id/maintenance",
+    async ({ params, user }) =>
+      vehicleService.getMaintenanceLogs(params.id, await staffWarehouse(user)),
+    {
+      params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+      detail: {
+        summary: "List maintenance & service history logs for a vehicle",
+        tags: ["Vehicles"],
+      },
+    },
+  )
+  .post(
+    "/:id/maintenance",
+    async ({ params, body, user }) =>
+      vehicleService.createMaintenanceLog(
+        params.id,
+        Number(user.sub),
+        body,
+        await staffWarehouse(user),
+      ),
+    {
+      params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+      body: t.Object({
+        maintenance_type: t.Union([
+          t.Literal("preventive"),
+          t.Literal("repair"),
+          t.Literal("tire_battery"),
+          t.Literal("inspection"),
+          t.Literal("breakdown"),
+        ]),
+        title: t.String({ minLength: 1, maxLength: 160 }),
+        description: t.Optional(t.Nullable(t.String({ maxLength: 1000 }))),
+        workshop_name: t.Optional(t.Nullable(t.String({ maxLength: 160 }))),
+        odometer_km: t.Optional(t.Nullable(t.Numeric({ minimum: 0 }))),
+        estimated_cost: t.Optional(t.Nullable(t.Numeric({ minimum: 0 }))),
+        put_in_maintenance: t.Optional(t.Boolean()),
+        expected_return_at: t.Optional(t.Nullable(t.String())),
+      }),
+      detail: {
+        summary: "Create a vehicle maintenance or service log",
+        tags: ["Vehicles"],
+      },
+    },
+  )
+  .patch(
+    "/:id/maintenance/:logId",
+    async ({ params, body, user }) =>
+      vehicleService.updateMaintenanceLog(
+        params.id,
+        params.logId,
+        Number(user.sub),
+        body,
+        await staffWarehouse(user),
+      ),
+    {
+      params: t.Object({
+        id: t.Numeric({ minimum: 1 }),
+        logId: t.Numeric({ minimum: 1 }),
+      }),
+      body: t.Object({
+        version: t.Integer({ minimum: 1 }),
+        status: t.Union([
+          t.Literal("open"),
+          t.Literal("in_progress"),
+          t.Literal("completed"),
+          t.Literal("cancelled"),
+        ]),
+        actual_cost: t.Optional(t.Nullable(t.Numeric({ minimum: 0 }))),
+        odometer_km: t.Optional(t.Nullable(t.Numeric({ minimum: 0 }))),
+        next_service_odometer_km: t.Optional(t.Nullable(t.Numeric({ minimum: 0 }))),
+        workshop_name: t.Optional(t.Nullable(t.String({ maxLength: 160 }))),
+        description: t.Optional(t.Nullable(t.String({ maxLength: 1000 }))),
+        restore_to_available: t.Optional(t.Boolean()),
+      }),
+      detail: {
+        summary: "Update or complete a vehicle maintenance log",
+        tags: ["Vehicles"],
+      },
+    },
+  );

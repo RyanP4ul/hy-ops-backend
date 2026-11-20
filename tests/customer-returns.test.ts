@@ -108,6 +108,7 @@ describe.skipIf(!testUrl)("customer return retrieval", () => {
     await returns.assign(staff, task.id, { version: 1, vehicleId: 1, driverId: 3, operationKey: crypto.randomUUID() });
     await recordPosition(1, { latitude: 14.5, longitude: 121, accuracyM: 5 });
     expect((await sql`select status from deliveries where id=${original.run}`)[0].status).toBe("in_transit");
+    await require("./driver-fixture").seedReturnProof(sql, task.id);
     await returns.collect(3, task.id, { version: 2, operationKey: crypto.randomUUID() });
     const before = await balances();
     await recordPosition(1, { latitude: 14.5, longitude: 121, accuracyM: 5, recordedAt: new Date(Date.now() + 10).toISOString() });
@@ -153,6 +154,8 @@ describe.skipIf(!testUrl)("customer return retrieval", () => {
     const command = { version: 2, operationKey: crypto.randomUUID() };
     await rejects(returns.collect(4, first.id, command), "not found");
     await rejects(returns.collect(3, first.id, { ...command, version: 1 }), "changed");
+    await rejects(returns.collect(3, first.id, command), "proof of collection");
+    await require("./driver-fixture").seedReturnProof(sql, first.id);
     await returns.collect(3, first.id, command);
     await returns.collect(3, first.id, command);
     expect((await driver.trip(3, assigned.deliveryId)).status).toBe("returning");
@@ -176,6 +179,7 @@ describe.skipIf(!testUrl)("customer return retrieval", () => {
     expect(assigned.deliveryId).toBe(original.run);
     expect((await driver.trip(3, original.run)).status).toBe("in_transit");
     await rejects(delivery.completeDelivery(original.run, 1, 2), );
+    await require("./driver-fixture").seedReturnProof(sql, task.id);
     await returns.collect(3, task.id, { version: 2, operationKey: crypto.randomUUID() });
     await delivery.completeDelivery(original.run, 1, 2);
     expect(await balances()).toEqual(before);
@@ -194,6 +198,7 @@ describe.skipIf(!testUrl)("customer return retrieval", () => {
     await require("./driver-fixture").seedStopProof(sql, trip.stops[0].id);
     await driver.outcome(3, trip.stops[0].id, { version: trip.version, operationKey: crypto.randomUUID() }, "delivered");
     expect((await driver.trip(3, outbound.id)).status).toBe("in_transit");
+    await require("./driver-fixture").seedReturnProof(sql, task.id);
     await returns.collect(3, task.id, { version: 2, operationKey: crypto.randomUUID() });
     expect((await driver.trip(3, outbound.id)).status).toBe("returning");
     await delivery.completeDelivery(outbound.id, 1, 2);

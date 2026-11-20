@@ -1,6 +1,7 @@
 import { relations } from "drizzle-orm";
 import {
   integer,
+  jsonb,
   pgTable,
   varchar,
   boolean,
@@ -20,6 +21,9 @@ export const warehouses = pgTable("warehouses", {
   longitude: numeric(),
   pickup_contact_name: varchar(),
   pickup_contact_phone: varchar(),
+  daily_order_limit: integer("daily_order_limit"),
+  operating_days: jsonb("operating_days").$type<number[]>(),
+  arrival_radius_m: integer("arrival_radius_m"),
   is_active: boolean().notNull().default(true),
   version: integer().notNull().default(1),
   is_archived: boolean().notNull().default(false),

@@ -14,7 +14,7 @@ export class AddOrderHandler extends RequestBase<typeof AddOrderHandler.schema> 
     const data_parsed = JSON.parse(order_data) as {
       id: number;
       customer_id: number;
-      delivery_type: "LALAMOVE" | "PICKUP" | "INTERNAL";
+      delivery_type: "LALAMOVE" | "INTERNAL";
       notes: string | null;
     };
 

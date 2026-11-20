@@ -20,7 +20,7 @@ export const lalamoveRoutes = new Elysia({ prefix: "/lalamove" }).decorate("user
   .put("/context/:id/warehouse", ({ params, body, user }) => LalamoveService.setPickupWarehouse(params.id, body.version, body.warehouse_id, user), {
     params: id, body: t.Object({ version: t.Integer({ minimum: 1 }), warehouse_id: t.Integer({ minimum: 1 }) }) })
   .put("/context/:id/method", ({ params, body, user }) => LalamoveService.setMethod(params.id, body.version, body.method, user), {
-    params: id, body: t.Object({ version: t.Integer({ minimum: 1 }), method: t.Union([t.Literal("INTERNAL"), t.Literal("PICKUP"), t.Literal("LALAMOVE")]) }) })
+    params: id, body: t.Object({ version: t.Integer({ minimum: 1 }), method: t.Union([t.Literal("INTERNAL"), t.Literal("LALAMOVE")]) }) })
   .put("/context/:id/pickup", ({ params, body, user }) => LalamoveService.pickup(params.id, body.name, body.phone, user), {
     params: id, body: t.Object({ name: t.String({ minLength: 1, maxLength: 100, pattern: "\\S" }), phone: t.String({ maxLength: 20 }) }) })
   .post("/quotations", ({ body, user }) => LalamoveService.createQuotation(body, user), { body: t.Object({

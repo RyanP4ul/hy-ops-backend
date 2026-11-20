@@ -260,6 +260,7 @@ describe.skipIf(!testUrl)("Lalamove disposable PostgreSQL lifecycle", () => {
     const routes = require("../src/modules/lalamove/webhook").lalamoveWebhookRoutes;
     const call = (body: string) => routes.handle(new Request("http://localhost/webhooks/lalamove", { method: "POST", headers: { "Content-Type": "application/json" }, body }));
     expect((await call("")).status).toBe(200);
+    expect((await call("{}")).status).toBe(200);
     expect((await call(JSON.stringify({ data: {} }))).status).toBe(401);
     const b = await book();
     const data = { order: { orderId: provider.orderId }, updatedAt: new Date().toISOString() };

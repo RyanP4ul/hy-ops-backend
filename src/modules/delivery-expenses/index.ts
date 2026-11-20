@@ -1,5 +1,6 @@
 import { Elysia, t } from "elysia";
 import { buildRoutePoints, getGoogleDrivingRoute } from "./google-routes";
+import { optimizeStopSequence } from "./osrm";
 import { estimateDeliveryExpenses } from "./delivery-expense";
 
 function configuredNumber(name: string, fallback: number, allowZero = false) {
@@ -64,4 +65,29 @@ export const deliveryEstimateRoutes = new Elysia({
       tollFeeOverride: t.Optional(t.Number({ minimum: 0 })),
     }),
     detail: { summary: "Estimate delivery expenses using Google Routes", tags: ["Delivery Expenses"] },
-  });
+  })
+  .post(
+    "/optimize-route",
+    async ({ body }) => optimizeStopSequence(body.origin, body.stops),
+    {
+      body: t.Object({
+        origin: t.Object({
+          latitude: t.Number({ minimum: -90, maximum: 90 }),
+          longitude: t.Number({ minimum: -180, maximum: 180 }),
+        }),
+        stops: t.Array(
+          t.Object({
+            orderId: t.Integer({ minimum: 1 }),
+            latitude: t.Number({ minimum: -90, maximum: 90 }),
+            longitude: t.Number({ minimum: -180, maximum: 180 }),
+          }),
+          { minItems: 1, maxItems: 25 },
+        ),
+      }),
+      detail: {
+        summary: "Optimize multi-stop visiting sequence",
+        description: "Reorders delivery stops from the warehouse origin using OSRM Trip (TSP) with Haversine fallback.",
+        tags: ["Delivery Expenses"],
+      },
+    },
+  );

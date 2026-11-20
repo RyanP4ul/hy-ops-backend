@@ -45,6 +45,16 @@ export const warehouseRoutes = new Elysia({ prefix: "/warehouses" })
     );
     return result;
   }, { detail: { summary: 'Get names', description: 'GET endpoint for names in the warehouses module.', tags: ['Warehouses'] } })
+  .get("/:id/overview", async ({ params }) => {
+    return warehouseService.getWarehouseOverview(Number(params.id));
+  }, {
+    params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+    detail: {
+      summary: "Get warehouse operations hub overview",
+      description: "Returns warehouse details alongside vehicle, driver, staff, inventory, and active delivery summaries.",
+      tags: ["Warehouses"],
+    },
+  })
   .get("/:id", async ({ params, set }) => {
     const warehouse = await warehouseService.getWarehouseById(
       Number(params.id),

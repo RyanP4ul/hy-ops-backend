@@ -26,7 +26,7 @@ export async function notifyDeliveryStaff(
   if (!recipients.length) return;
   await tx.insert(notifications).values(recipients.map(({ id }) => ({
     user_id: id, title, message, type, created_at: Math.floor(Date.now() / 1000),
-  }))).onConflictDoNothing({ target: [notifications.user_id, notifications.title] });
+  }))).onConflictDoNothing();
   await tx.execute(sql`select pg_notify('hyops_resource_changed', ${JSON.stringify({
     type: "RESOURCE_CHANGED", payload: { resource: "notifications", eventId: crypto.randomUUID() },
   })})`);

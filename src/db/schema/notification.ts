@@ -5,8 +5,9 @@ import {
   varchar,
   boolean,
   index,
-  unique,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { users } from "./users";
 
 export const notifications = pgTable(
@@ -31,7 +32,9 @@ export const notifications = pgTable(
     index("notifications_id_idx").on(t.id),
     index("notifications_user_id_idx").on(t.user_id),
     index("notifications_title_idx").on(t.title),
-    unique("notifications_user_title_unique_idx").on(t.user_id, t.title),
+    uniqueIndex("notifications_user_title_unread_idx")
+      .on(t.user_id, t.title)
+      .where(sql`${t.is_read} = false`),
   ],
 );
 

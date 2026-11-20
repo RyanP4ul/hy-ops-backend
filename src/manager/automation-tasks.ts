@@ -1,4 +1,4 @@
-import { and, eq, inArray, lte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, lte, ne, or, sql } from "drizzle-orm";
 import { db } from "@/db/index";
 import {
   inventory,
@@ -9,14 +9,18 @@ import {
   product_variants,
   products,
   settings,
+  staffs,
   users,
   automations,
   deliveries,
   deliveries_event,
+  vehicles,
+  warehouses,
 } from "@/db/schema";
 import { logger } from "../utils/logger";
 import { taskManager } from "./task-manager";
 import type { AutomationSelect } from "@/db/schema/automation";
+import { activeInventory } from "../modules/lifecycle/availability";
 
 const LOW_STOCK_TASK = "low_stock_checker";
 const OVERDUE_PAYMENT_TASK = "overdue_payment_checker";
@@ -70,21 +74,38 @@ async function runAndRecord(
   }
 }
 
-async function getRecipientIds() {
-  const recipients = await db
+const NOTIFICATION_READ_COOLDOWN_SECONDS = 24 * 60 * 60;
+const COD_REMITTANCE_GRACE_MS = 24 * 60 * 60 * 1000;
+
+export async function getRecipientIdsForWarehouse(warehouseId?: number) {
+  const admins = await db
     .select({ id: users.id })
     .from(users)
     .where(
       and(
-        or(eq(users.role, "admin"), eq(users.role, "staff")),
+        eq(users.role, "admin"),
+        eq(users.is_active, true),
         eq(users.is_archived, false),
       ),
     );
 
-  return recipients.map(({ id }) => id);
+  const staffRows = await db
+    .select({ id: users.id })
+    .from(users)
+    .innerJoin(staffs, eq(staffs.user_id, users.id))
+    .where(
+      and(
+        eq(users.role, "staff"),
+        eq(users.is_active, true),
+        eq(users.is_archived, false),
+        warehouseId === undefined ? undefined : eq(staffs.warehouse_id, warehouseId),
+      ),
+    );
+
+  return [...new Set([...admins.map((r) => r.id), ...staffRows.map((r) => r.id)])];
 }
 
-async function createNotifications(
+export async function createNotifications(
   recipientIds: number[],
   title: string,
   message: string,
@@ -94,39 +115,92 @@ async function createNotifications(
     return 0;
   }
 
+  const nowSeconds = Math.floor(Date.now() / 1000);
+
   return await db.transaction(async (tx) => {
     const existing = await tx
-      .select({ userId: notifications.user_id })
+      .select({
+        id: notifications.id,
+        userId: notifications.user_id,
+        isRead: notifications.is_read,
+        message: notifications.message,
+        createdAt: notifications.created_at,
+      })
       .from(notifications)
       .where(
         and(
           inArray(notifications.user_id, recipientIds),
           eq(notifications.title, title),
         ),
-      );
-    const existingUserIds = new Set(existing.map(({ userId }) => userId));
-    const missingUserIds = recipientIds.filter(
-      (userId) => !existingUserIds.has(userId),
-    );
+      )
+      .orderBy(desc(notifications.id));
 
-    if (missingUserIds.length === 0) {
-      return 0;
+    const unreadByUser = new Map<number, { id: number; message: string }>();
+    const latestReadByUser = new Map<number, { message: string; createdAt: number }>();
+
+    for (const row of existing) {
+      if (!row.isRead && !unreadByUser.has(row.userId)) {
+        unreadByUser.set(row.userId, { id: row.id, message: row.message });
+      } else if (row.isRead && !latestReadByUser.has(row.userId)) {
+        latestReadByUser.set(row.userId, { message: row.message, createdAt: row.createdAt });
+      }
     }
 
-    const results = await tx
-      .insert(notifications)
-      .values(
-        missingUserIds.map((user_id) => ({
-          user_id,
-          title,
-          message,
-          type,
-          created_at: Math.floor(Date.now() / 1000),
-        })),
-      )
-      .returning({ id: notifications.id });
+    const toInsert: number[] = [];
+    let mutated = 0;
 
-    return results.length;
+    for (const userId of recipientIds) {
+      const unread = unreadByUser.get(userId);
+      if (unread) {
+        if (unread.message !== message) {
+          await tx
+            .update(notifications)
+            .set({ message, created_at: nowSeconds })
+            .where(eq(notifications.id, unread.id));
+          mutated += 1;
+        }
+        continue;
+      }
+
+      const lastRead = latestReadByUser.get(userId);
+      if (
+        lastRead &&
+        lastRead.message === message &&
+        nowSeconds - lastRead.createdAt < NOTIFICATION_READ_COOLDOWN_SECONDS
+      ) {
+        continue;
+      }
+
+      toInsert.push(userId);
+    }
+
+    if (toInsert.length > 0) {
+      const results = await tx
+        .insert(notifications)
+        .values(
+          toInsert.map((user_id) => ({
+            user_id,
+            title,
+            message,
+            type,
+            is_read: false,
+            created_at: nowSeconds,
+          })),
+        )
+        .returning({ id: notifications.id });
+      mutated += results.length;
+    }
+
+    if (mutated > 0) {
+      await tx.execute(
+        sql`select pg_notify('hyops_resource_changed', ${JSON.stringify({
+          type: "RESOURCE_CHANGED",
+          payload: { resource: "notifications", eventId: crypto.randomUUID() },
+        })})`,
+      );
+    }
+
+    return mutated;
   });
 }
 
@@ -144,38 +218,47 @@ async function checkLowStock() {
     );
   }
 
+  const availableExpr = sql<number>`(${inventory.quantity} - ${inventory.reserved})`.mapWith(Number);
+  const effectiveThresholdExpr = sql<number>`coalesce(${inventory.reorder_point}, ${threshold})`.mapWith(Number);
+
   const lowStockRows = await db
     .select({
+      warehouseId: inventory.warehouse_id,
+      warehouseName: warehouses.name,
       productName: products.name,
       sku: product_variants.sku,
       quantity: inventory.quantity,
+      reserved: inventory.reserved,
+      available: availableExpr,
+      effectiveThreshold: effectiveThresholdExpr,
     })
     .from(inventory)
+    .innerJoin(warehouses, eq(inventory.warehouse_id, warehouses.id))
     .leftJoin(products, eq(inventory.product_id, products.id))
     .leftJoin(
       product_variants,
       eq(inventory.product_variant_id, product_variants.id),
     )
-    .where(lte(inventory.quantity, threshold));
+    .where(and(activeInventory(), lte(availableExpr, effectiveThresholdExpr)));
 
   if (lowStockRows.length === 0) {
     return;
   }
 
-  const preview = lowStockRows
-    .slice(0, 3)
-    .map(
-      ({ productName, sku, quantity }) => `${productName ?? sku} (${quantity})`,
-    )
-    .join(", ");
-  const suffix =
-    lowStockRows.length > 3 ? ` and ${lowStockRows.length - 3} more` : "";
-
-  for (const { productName, sku, quantity } of lowStockRows) {
+  const recipientCache = new Map<number, number[]>();
+  for (const row of lowStockRows) {
+    let recipients = recipientCache.get(row.warehouseId);
+    if (!recipients) {
+      recipients = await getRecipientIdsForWarehouse(row.warehouseId);
+      recipientCache.set(row.warehouseId, recipients);
+    }
+    const label = row.productName
+      ? `${row.productName}${row.sku ? ` (${row.sku})` : ""}`
+      : row.sku ?? "Inventory item";
     await createNotifications(
-      await getRecipientIds(),
-      `Low stock: ${productName ?? sku}`,
-      `${quantity} left in stock.`,
+      recipients,
+      `Low stock: ${label} — ${row.warehouseName}`,
+      `${row.available} available (${row.quantity} on hand, ${row.reserved} reserved; reorder point: ${row.effectiveThreshold}).`,
       "LOW_STOCK",
     );
   }
@@ -189,6 +272,7 @@ export function findOverduePayments() {
   const now = new Date();
   const net30Cutoff = new Date(now);
   net30Cutoff.setDate(net30Cutoff.getDate() - 30);
+  const codCutoff = new Date(now.getTime() - COD_REMITTANCE_GRACE_MS);
 
   const orderTotals = db
     .select({
@@ -215,6 +299,7 @@ export function findOverduePayments() {
   return db
     .select({
       orderId: orders.id,
+      warehouseId: orders.warehouse_id,
       orderNumber: orders.order_number,
       paymentArrangement: orders.payment_arrangement,
       createdAt: orders.created_at,
@@ -235,6 +320,11 @@ export function findOverduePayments() {
           and(
             eq(orders.payment_arrangement, "NET_30"),
             lte(orders.created_at, net30Cutoff),
+          ),
+          and(
+            eq(orders.payment_arrangement, "PAY_ON_DELIVERY"),
+            eq(orders.status, "COMPLETED"),
+            lte(orders.updated_at, codCutoff),
           ),
         ),
         sql`${orderTotals.total} > coalesce(${paidTotals.total}, 0)`,
@@ -262,11 +352,21 @@ async function checkOverduePayments() {
       ),
     );
 
-  for (const { orderNumber } of overdueRows) {
+  const recipientCache = new Map<number, number[]>();
+  for (const row of overdueRows) {
+    let recipients = recipientCache.get(row.warehouseId);
+    if (!recipients) {
+      recipients = await getRecipientIdsForWarehouse(row.warehouseId);
+      recipientCache.set(row.warehouseId, recipients);
+    }
+    const detail =
+      row.paymentArrangement === "PAY_ON_DELIVERY"
+        ? "Completed COD order has unremitted balance past 24h."
+        : "Payment is past due.";
     await createNotifications(
-      await getRecipientIds(),
-      `Overdue payment: Order ${orderNumber}`,
-      `Payment is past due.`,
+      recipients,
+      `Overdue payment: Order ${row.orderNumber}`,
+      detail,
       "OVERDUE_PAYMENT",
     );
   }
@@ -281,6 +381,7 @@ async function checkDeliveryFollowUp() {
   const deliveryRows = await db
     .select({
       id: deliveries.id,
+      warehouseId: vehicles.warehouse_id,
       scheduledDate: deliveries.scheduled_date,
       departureTime: deliveries.departure_time,
       status: deliveries.status,
@@ -292,6 +393,7 @@ async function checkDeliveryFollowUp() {
       )`,
     })
     .from(deliveries)
+    .innerJoin(vehicles, eq(deliveries.vehicle_id, vehicles.id))
     .where(
       or(
         eq(deliveries.status, "scheduled"),
@@ -306,9 +408,15 @@ async function checkDeliveryFollowUp() {
     return delivery.hasIssue || scheduledAt <= now;
   });
 
+  const recipientCache = new Map<number, number[]>();
   for (const delivery of needsFollowUp) {
+    let recipients = recipientCache.get(delivery.warehouseId);
+    if (!recipients) {
+      recipients = await getRecipientIdsForWarehouse(delivery.warehouseId);
+      recipientCache.set(delivery.warehouseId, recipients);
+    }
     await createNotifications(
-      await getRecipientIds(),
+      recipients,
       `Delivery #${delivery.id} needs attention`,
       delivery.hasIssue ? "Delay or failure reported." : "Past scheduled departure.",
       "DELIVERY_FOLLOW_UP",

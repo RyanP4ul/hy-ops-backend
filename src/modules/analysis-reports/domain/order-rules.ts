@@ -42,6 +42,7 @@ export interface ItemRaw {
   sku: string;
   qty: number;
   price: string | null;
+  cost?: string | null;
 }
 
 export function buildOrderViews(
@@ -70,6 +71,14 @@ export function buildOrderViews(
                 moneyToMinorUnits(i.price) * BigInt(i.qty),
               ),
             ),
+      costLine:
+        i.cost === null || i.cost === undefined
+          ? null
+          : Number(
+              minorUnitsToMoney(
+                moneyToMinorUnits(i.cost) * BigInt(i.qty),
+              ),
+            ),
     });
     itemsByOrder.set(i.orderId, list);
   }
@@ -92,6 +101,17 @@ export function buildOrderViews(
             minorUnitsToMoney(
               lines.reduce(
                 (sum, i) => sum + moneyToMinorUnits(i.line ?? 0),
+                0n,
+              ),
+            ),
+          )
+        : null;
+    const costTotal =
+      lines.length > 0 && lines.every((i) => i.costLine !== null && i.costLine !== undefined)
+        ? Number(
+            minorUnitsToMoney(
+              lines.reduce(
+                (sum, i) => sum + moneyToMinorUnits(i.costLine ?? 0),
                 0n,
               ),
             ),
@@ -137,6 +157,7 @@ export function buildOrderViews(
       arrangement,
       items: lines,
       total,
+      costTotal,
       paid,
       balance: o.status === "CANCELLED" ? 0 : balance,
       dueAt,

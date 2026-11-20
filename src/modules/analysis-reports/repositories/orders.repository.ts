@@ -99,6 +99,7 @@ export async function findOrderViews(
         sku: product_variants.sku,
         qty: order_items.quantity,
         price: order_items.unit_price_snapshot,
+        cost: order_items.unit_cost_snapshot,
       })
       .from(order_items)
       .innerJoin(inventory, eq(order_items.inventory_id, inventory.id))

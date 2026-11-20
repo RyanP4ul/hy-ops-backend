@@ -7,29 +7,36 @@ import { db } from "@/db/index";
 import { deliveries, deliveries_stops } from "@/db/schema/deliveries";
 import { inventory } from "@/db/schema/inventory";
 import { order_items, orders } from "@/db/schema/order";
-import { payments } from "@/db/schema/payment";
-import { product_variants, products } from "@/db/schema/products";
+import { product_variants } from "@/db/schema/products";
 import { customer_addresses, customers, users } from "@/db/schema/users";
-import { and, asc, desc, eq, gte, lt, ne, or, sql } from "drizzle-orm";
+import { vehicles } from "@/db/schema/vehicles";
+import { and, asc, desc, eq, ne, or, sql } from "drizzle-orm";
 
 export abstract class DashboardService {
   static async getDeliveryCalendar(warehouseId?: number) {
     return getDeliveryCalendar(warehouseId);
   }
-  static async getExceptions() {
-    const [result] = await db.select({
-      overdueDeliveries: sql<number>`count(*) filter (where ${deliveries.status} = 'scheduled' and (${deliveries.scheduled_date} + ${deliveries.departure_time}) at time zone 'Asia/Manila' < now())`.mapWith(Number),
-    }).from(deliveries);
-    const [pending] = await db.select({ count: sql<number>`count(*)`.mapWith(Number) }).from(orders).where(eq(orders.status, "PENDING"));
-    return { ...result, pendingOrders: pending.count };
+  static async getExceptions(warehouseId?: number) {
+    const [result] = await db
+      .select({
+        overdueDeliveries: sql<number>`count(*) filter (where ${deliveries.status} = 'scheduled' and (${deliveries.scheduled_date} + ${deliveries.departure_time}) at time zone 'Asia/Manila' < now())`.mapWith(Number),
+      })
+      .from(deliveries)
+      .innerJoin(vehicles, eq(deliveries.vehicle_id, vehicles.id))
+      .where(warehouseId === undefined ? undefined : eq(vehicles.warehouse_id, warehouseId));
+    const [pending] = await db
+      .select({ count: sql<number>`count(*)`.mapWith(Number) })
+      .from(orders)
+      .where(
+        and(
+          eq(orders.status, "PENDING"),
+          warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId),
+        ),
+      );
+    return { overdueDeliveries: result?.overdueDeliveries ?? 0, pendingOrders: pending?.count ?? 0 };
   }
 
-  static async getUpcomingDeliveries() {
-    const now = new Date();
-    const today = `${now.getUTCFullYear()}-${String(
-      now.getUTCMonth() + 1,
-    ).padStart(2, "0")}-${String(now.getUTCDate()).padStart(2, "0")}`;
-
+  static async getUpcomingDeliveries(warehouseId?: number) {
     const results = await db
       .select({
         id: deliveries.id,
@@ -40,6 +47,7 @@ export abstract class DashboardService {
         destination: sql<string>`case when count(distinct ${orders.shipping_address}) > 1 then 'Multiple destinations' else coalesce(min(${orders.shipping_address}), 'Destination unavailable') end`,
       })
       .from(deliveries)
+      .innerJoin(vehicles, eq(deliveries.vehicle_id, vehicles.id))
       .innerJoin(users, eq(deliveries.driver_id, users.id))
       .leftJoin(
         deliveries_stops,
@@ -51,6 +59,7 @@ export abstract class DashboardService {
         and(
           eq(deliveries.status, "scheduled"),
           sql`(${deliveries.scheduled_date} + ${deliveries.departure_time}) at time zone 'Asia/Manila' >= now()`,
+          warehouseId === undefined ? undefined : eq(vehicles.warehouse_id, warehouseId),
         ),
       )
       .groupBy(
@@ -72,7 +81,7 @@ export abstract class DashboardService {
     }));
   }
 
-  static async getActiveDeliveries() {
+  static async getActiveDeliveries(warehouseId?: number) {
     const results = await db
       .select({
         id: deliveries.id,
@@ -84,6 +93,7 @@ export abstract class DashboardService {
         stops: sql<number>`count(${deliveries_stops.order_id})`,
       })
       .from(deliveries)
+      .innerJoin(vehicles, eq(deliveries.vehicle_id, vehicles.id))
       .innerJoin(users, eq(deliveries.driver_id, users.id))
       .leftJoin(
         deliveries_stops,
@@ -92,10 +102,13 @@ export abstract class DashboardService {
       .leftJoin(orders, eq(deliveries_stops.order_id, orders.id))
       .leftJoin(customers, eq(orders.customer_id, customers.id))
       .where(
-        or(
-          eq(deliveries.status, "scheduled"),
-          eq(deliveries.status, "in_transit"),
-          eq(deliveries.status, "returning"),
+        and(
+          or(
+            eq(deliveries.status, "scheduled"),
+            eq(deliveries.status, "in_transit"),
+            eq(deliveries.status, "returning"),
+          ),
+          warehouseId === undefined ? undefined : eq(vehicles.warehouse_id, warehouseId),
         ),
       )
       .groupBy(deliveries.id, users.name, deliveries.status)
@@ -112,7 +125,7 @@ export abstract class DashboardService {
     }));
   }
 
-  static async getTopSellingProducts() {
+  static async getTopSellingProducts(warehouseId?: number) {
     const results = await db
       .select({
         name: product_variants.name,
@@ -131,7 +144,12 @@ export abstract class DashboardService {
         product_variants,
         eq(inventory.product_variant_id, product_variants.id),
       )
-      .where(ne(orders.status, "CANCELLED"))
+      .where(
+        and(
+          ne(orders.status, "CANCELLED"),
+          warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId),
+        ),
+      )
       .groupBy(product_variants.id, product_variants.name, product_variants.sku)
       .orderBy(desc(sql`sum(${order_items.quantity})`))
       .limit(5);
@@ -148,7 +166,7 @@ export abstract class DashboardService {
     }));
   }
 
-  static async getTopCustomers() {
+  static async getTopCustomers(warehouseId?: number) {
     const results = await db
       .select({
         name: customers.company_name,
@@ -176,7 +194,12 @@ export abstract class DashboardService {
       .from(orders)
       .innerJoin(customers, eq(orders.customer_id, customers.id))
       .leftJoin(order_items, eq(order_items.order_id, orders.id))
-      .where(ne(orders.status, "CANCELLED"))
+      .where(
+        and(
+          ne(orders.status, "CANCELLED"),
+          warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId),
+        ),
+      )
       .groupBy(customers.id, customers.company_name)
       .orderBy(desc(sql`count(distinct ${orders.id})`))
       .limit(5);
@@ -195,19 +218,27 @@ export abstract class DashboardService {
     }));
   }
 
-  static async getSalesByDay() {
+  static async getSalesByDay(warehouseId?: number) {
     const end = dayStart(manilaDay(Date.now())) + DAY; const start = end - 7 * DAY;
-    const movements = await findCashMovements(DEFAULT_FILTERS, { start, end });
+    const filters = {
+      ...DEFAULT_FILTERS,
+      warehouses: warehouseId === undefined ? [] : [String(warehouseId)],
+    };
+    const movements = await findCashMovements(filters, { start, end });
     return Array.from({ length: 7 }, (_, i) => {
       const instant = start + i * DAY; const key = manilaDay(instant);
       return { day: new Date(instant).toLocaleDateString("en-US", { weekday: "short", timeZone: "Asia/Manila" }), sales: sumMoney(movements.filter((p) => manilaDay(p.at) === key), (p) => p.amount) };
     });
   }
-  static async getRevenueByMonth() {
+  static async getRevenueByMonth(warehouseId?: number) {
     const today = manilaDay(Date.now()); const year = Number(today.slice(0, 4)), month = Number(today.slice(5, 7)) - 1;
     const keys = Array.from({ length: 6 }, (_, i) => new Date(Date.UTC(year, month - 5 + i, 1)).toISOString().slice(0, 7));
     const start = dayStart(`${keys[0]}-01`); const end = dayStart(new Date(Date.UTC(year, month + 1, 1)).toISOString().slice(0, 10));
-    const movements = await findCashMovements(DEFAULT_FILTERS, { start, end });
+    const filters = {
+      ...DEFAULT_FILTERS,
+      warehouses: warehouseId === undefined ? [] : [String(warehouseId)],
+    };
+    const movements = await findCashMovements(filters, { start, end });
     return keys.map((key) => ({ month: new Date(`${key}-01T00:00:00+08:00`).toLocaleDateString("en-US", { month: "short", timeZone: "Asia/Manila" }), revenue: sumMoney(movements.filter((p) => manilaDay(p.at).startsWith(key)), (p) => p.amount) }));
   }
 }

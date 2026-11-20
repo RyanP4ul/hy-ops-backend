@@ -35,6 +35,7 @@ export const inventory = pgTable(
       }),
     quantity: integer().notNull(),
     reserved: integer().notNull().default(0),
+    reorder_point: integer("reorder_point"),
     is_archived: boolean().notNull().default(false),
     archived_at: integer(),
     is_active: boolean().notNull().default(true),
