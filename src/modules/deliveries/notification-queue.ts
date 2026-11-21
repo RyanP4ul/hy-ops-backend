@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { db } from "../../db";
 import {
   customers,
@@ -71,14 +71,37 @@ export async function queueDeliveryNotifications(
 }
 
 /** External completion uses the same outbox, without inventing an internal stop. */
-export async function queueExternalDeliveryNotification(tx: Transaction, bookingId: number, orderId: number) {
+export async function queueExternalDeliveryNotification(
+  tx: Transaction,
+  bookingId: number,
+  orderId: number,
+  lalamoveStopId?: number,
+) {
   const [contact] = await tx.select({ email: users.email, phone: orders.shipping_phone }).from(orders)
     .innerJoin(customers, eq(customers.id, orders.customer_id)).innerJoin(users, eq(users.id, customers.user_id)).where(eq(orders.id, orderId));
   for (const channel of ["sms", "email"] as const) {
     const recipient = channel === "sms" ? contact?.phone?.trim() : contact?.email?.trim();
-    await tx.insert(delivery_notifications).values({ booking_id: bookingId, event_key: "delivered", event_type: "delivered", channel,
-      recipient: recipient || null, status: recipient ? "pending" : "skipped", error: recipient ? null : "Customer contact is unavailable." })
-      .onConflictDoNothing({ target: [delivery_notifications.booking_id, delivery_notifications.event_key, delivery_notifications.channel] });
+    const values = {
+      booking_id: bookingId,
+      lalamove_stop_id: lalamoveStopId ?? null,
+      event_key: "delivered",
+      event_type: "delivered" as const,
+      channel,
+      recipient: recipient || null,
+      status: (recipient ? "pending" : "skipped") as "pending" | "skipped",
+      error: recipient ? null : "Customer contact is unavailable.",
+    };
+    if (lalamoveStopId !== undefined) {
+      await tx.insert(delivery_notifications).values(values).onConflictDoNothing({
+        target: [delivery_notifications.lalamove_stop_id, delivery_notifications.event_key, delivery_notifications.channel],
+        where: sql`${delivery_notifications.lalamove_stop_id} is not null`,
+      });
+    } else {
+      await tx.insert(delivery_notifications).values(values).onConflictDoNothing({
+        target: [delivery_notifications.booking_id, delivery_notifications.event_key, delivery_notifications.channel],
+        where: sql`${delivery_notifications.lalamove_stop_id} is null`,
+      });
+    }
   }
 }
 

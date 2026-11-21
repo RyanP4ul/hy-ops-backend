@@ -1,5 +1,5 @@
 import Elysia, { t } from "elysia";
-import { orderEditSchema, orderModel, savedShippingAddressSchema } from "./model";
+import { orderEditSchema, orderGroupAssignSchema, orderModel, orderSeparateSchema, savedShippingAddressSchema } from "./model";
 import { OrderService } from "./service";
 import { AuthUser } from "../auth/schema";
 import { staffWarehouse, assertOrderScope, assignOrderWarehouse } from "../deliveries/scope";
@@ -90,6 +90,26 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
   }, {
     detail: { summary: 'Mark all processing orders in a group ready for delivery', description: 'Transitions all processing non-walk-in orders in the order group to SCHEDULING and issues invoices.', tags: ['Orders'] },
     params: t.Object({ groupId: t.String({ format: "uuid" }) }),
+  })
+  .get("/groups/:groupId/candidates", async ({ params, user }) => {
+    return OrderService.getGroupCandidates(params.groupId, await staffWarehouse(user));
+  }, {
+    detail: { summary: 'List eligible same-customer independent orders for a group', description: 'Returns pre-dispatch independent orders belonging to the same customer as the target order group.', tags: ['Orders'] },
+    params: t.Object({ groupId: t.String({ format: "uuid" }) }),
+  })
+  .post("/groups", async ({ body, user }) => {
+    return OrderService.groupOrders(body.orders, body.target_group_id, await staffWarehouse(user));
+  }, {
+    detail: { summary: 'Group independent orders for the same customer', description: 'Groups two or more independent same-customer orders into a new order group, or adds orders into an existing same-customer order group.', tags: ['Orders'] },
+    body: orderGroupAssignSchema,
+  })
+  .post("/:id/separate", async ({ params, body, user }) => {
+    await assertOrderScope(params.id, await staffWarehouse(user));
+    return OrderService.separateOrderFromGroup(params.id, body.version);
+  }, {
+    detail: { summary: 'Separate an individual order from its order group', description: 'Removes an order from its order group and dissolves the group automatically if only one order remains.', tags: ['Orders'] },
+    params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+    body: orderSeparateSchema,
   })
   .get("/details", async ({ query, user }) => {
     const order_ids = query.ids ? query.ids.split(",").map(Number) : [];

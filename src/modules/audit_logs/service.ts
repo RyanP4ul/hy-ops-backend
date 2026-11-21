@@ -95,6 +95,7 @@ export abstract class AuditLogService {
         .select({
           id: audit_logs.id,
           user_id: audit_logs.user_id,
+          user_name: users.name,
           action: audit_logs.action,
           entity_id: audit_logs.entity_id,
           entity_type: audit_logs.entity_type,

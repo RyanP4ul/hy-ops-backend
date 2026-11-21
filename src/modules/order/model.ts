@@ -73,6 +73,24 @@ export const orderEditSchema = t.Object({
 
 export type OrderEditInput = Static<typeof orderEditSchema>;
 
+export const orderSeparateSchema = t.Object({
+  version: t.Integer({ minimum: 1 }),
+});
+
+export type OrderSeparateInput = Static<typeof orderSeparateSchema>;
+
+export const orderGroupMemberRefSchema = t.Object({
+  id: t.Integer({ minimum: 1 }),
+  version: t.Integer({ minimum: 1 }),
+});
+
+export const orderGroupAssignSchema = t.Object({
+  orders: t.Array(orderGroupMemberRefSchema, { minItems: 1, maxItems: 25 }),
+  target_group_id: t.Optional(t.String({ format: "uuid" })),
+});
+
+export type OrderGroupAssignInput = Static<typeof orderGroupAssignSchema>;
+
 export const orderItemUpdateSchema = t.Object({
   quantity: t.Integer({ minimum: 1 }),
 });

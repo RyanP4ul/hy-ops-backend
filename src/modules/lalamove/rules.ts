@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { WorkflowError } from "../../utils/workflow-error";
+export const MAX_LALAMOVE_DROPOFF_STOPS = 19;
 export const terminalStatuses = new Set(["CANCELED", "REJECTED", "EXPIRED"]);
 export function fingerprint(value: unknown) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 export function safeTrackingLink(value: unknown): string | null {

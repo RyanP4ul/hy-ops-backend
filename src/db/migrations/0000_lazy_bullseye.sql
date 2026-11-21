@@ -205,6 +205,7 @@ CREATE TABLE "delivery_notifications" (
 	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "delivery_notifications_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"stop_id" integer,
 	"booking_id" integer,
+	"lalamove_stop_id" integer,
 	"channel" text NOT NULL,
 	"event_key" text DEFAULT 'delivered' NOT NULL,
 	"event_type" text DEFAULT 'delivered' NOT NULL,
@@ -217,7 +218,6 @@ CREATE TABLE "delivery_notifications" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "delivery_notification_stop_event_channel" UNIQUE("stop_id","event_key","channel"),
-	CONSTRAINT "delivery_notification_booking_event_channel" UNIQUE("booking_id","event_key","channel"),
 	CONSTRAINT "delivery_notification_owner_valid" CHECK (("delivery_notifications"."stop_id" is not null)::integer + ("delivery_notifications"."booking_id" is not null)::integer = 1),
 	CONSTRAINT "delivery_notification_channel_valid" CHECK ("delivery_notifications"."channel" in ('sms', 'email')),
 	CONSTRAINT "delivery_notification_event_valid" CHECK ("delivery_notifications"."event_type" in ('delivered', 'cancelled', 'rescheduled')),
@@ -293,9 +293,30 @@ CREATE TABLE "inventory" (
 	CONSTRAINT "inventory_warehouse_product_id_product_variant_id_unique_idx" UNIQUE("warehouse_id","product_id","product_variant_id")
 );
 --> statement-breakpoint
+CREATE TABLE "delivery_order_stops" (
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "delivery_order_stops_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
+	"booking_id" integer NOT NULL,
+	"order_id" integer NOT NULL,
+	"stop_index" integer NOT NULL,
+	"lalamove_stop_id" text,
+	"recipient_name" text NOT NULL,
+	"recipient_phone" text NOT NULL,
+	"dropoff_address" text NOT NULL,
+	"dropoff_lat" numeric(10, 6),
+	"dropoff_lng" numeric(10, 6),
+	"active" boolean DEFAULT false NOT NULL,
+	"pod_status" text,
+	"delivered_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "delivery_orders" (
 	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "delivery_orders_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"order_id" integer,
+	"pickup_warehouse_id" integer,
+	"is_route_optimized" boolean DEFAULT false NOT NULL,
+	"stop_count" integer DEFAULT 1 NOT NULL,
 	"environment" text DEFAULT 'sandbox' NOT NULL,
 	"market" text DEFAULT 'PH' NOT NULL,
 	"booking_state" text DEFAULT 'CONFIRMED' NOT NULL,
@@ -352,6 +373,10 @@ CREATE TABLE "lalamove_provider_ids" (
 CREATE TABLE "lalamove_quotations" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"order_id" integer NOT NULL,
+	"pickup_warehouse_id" integer,
+	"order_ids" jsonb,
+	"order_versions" jsonb,
+	"is_route_optimized" boolean DEFAULT false NOT NULL,
 	"booked_by" integer NOT NULL,
 	"order_version" integer NOT NULL,
 	"environment" text NOT NULL,
@@ -370,7 +395,7 @@ CREATE TABLE "notifications" (
 	"message" text NOT NULL,
 	"type" varchar(50) NOT NULL,
 	"is_read" boolean DEFAULT false NOT NULL,
-	"created_at" integer DEFAULT 1795177284 NOT NULL
+	"created_at" integer DEFAULT 1795179844 NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "order_groups" (
@@ -768,6 +793,7 @@ ALTER TABLE "deliveries_stops" ADD CONSTRAINT "deliveries_stops_delivery_id_deli
 ALTER TABLE "deliveries_stops" ADD CONSTRAINT "deliveries_stops_order_id_orders_id_fk" FOREIGN KEY ("order_id") REFERENCES "public"."orders"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
 ALTER TABLE "delivery_notifications" ADD CONSTRAINT "delivery_notifications_stop_id_deliveries_stops_id_fk" FOREIGN KEY ("stop_id") REFERENCES "public"."deliveries_stops"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "delivery_notifications" ADD CONSTRAINT "delivery_notifications_booking_id_delivery_orders_id_fk" FOREIGN KEY ("booking_id") REFERENCES "public"."delivery_orders"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "delivery_notifications" ADD CONSTRAINT "delivery_notifications_lalamove_stop_id_delivery_order_stops_id_fk" FOREIGN KEY ("lalamove_stop_id") REFERENCES "public"."delivery_order_stops"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "driver_return_proofs" ADD CONSTRAINT "driver_return_proofs_return_id_customer_returns_id_fk" FOREIGN KEY ("return_id") REFERENCES "public"."customer_returns"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "driver_return_proofs" ADD CONSTRAINT "driver_return_proofs_actor_id_users_id_fk" FOREIGN KEY ("actor_id") REFERENCES "public"."users"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "driver_stop_proofs" ADD CONSTRAINT "driver_stop_proofs_stop_id_deliveries_stops_id_fk" FOREIGN KEY ("stop_id") REFERENCES "public"."deliveries_stops"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -778,10 +804,14 @@ ALTER TABLE "driver_sync_receipts" ADD CONSTRAINT "driver_sync_receipts_actor_id
 ALTER TABLE "inventory" ADD CONSTRAINT "inventory_warehouse_id_warehouses_id_fk" FOREIGN KEY ("warehouse_id") REFERENCES "public"."warehouses"("id") ON DELETE set null ON UPDATE cascade;--> statement-breakpoint
 ALTER TABLE "inventory" ADD CONSTRAINT "inventory_product_id_products_id_fk" FOREIGN KEY ("product_id") REFERENCES "public"."products"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
 ALTER TABLE "inventory" ADD CONSTRAINT "inventory_product_variant_id_product_variants_id_fk" FOREIGN KEY ("product_variant_id") REFERENCES "public"."product_variants"("id") ON DELETE set null ON UPDATE cascade;--> statement-breakpoint
+ALTER TABLE "delivery_order_stops" ADD CONSTRAINT "delivery_order_stops_booking_id_delivery_orders_id_fk" FOREIGN KEY ("booking_id") REFERENCES "public"."delivery_orders"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "delivery_order_stops" ADD CONSTRAINT "delivery_order_stops_order_id_orders_id_fk" FOREIGN KEY ("order_id") REFERENCES "public"."orders"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "delivery_orders" ADD CONSTRAINT "delivery_orders_order_id_orders_id_fk" FOREIGN KEY ("order_id") REFERENCES "public"."orders"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "delivery_orders" ADD CONSTRAINT "delivery_orders_pickup_warehouse_id_warehouses_id_fk" FOREIGN KEY ("pickup_warehouse_id") REFERENCES "public"."warehouses"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "delivery_orders" ADD CONSTRAINT "delivery_orders_booked_by_users_id_fk" FOREIGN KEY ("booked_by") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "lalamove_provider_ids" ADD CONSTRAINT "lalamove_provider_ids_booking_id_delivery_orders_id_fk" FOREIGN KEY ("booking_id") REFERENCES "public"."delivery_orders"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "lalamove_quotations" ADD CONSTRAINT "lalamove_quotations_order_id_orders_id_fk" FOREIGN KEY ("order_id") REFERENCES "public"."orders"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "lalamove_quotations" ADD CONSTRAINT "lalamove_quotations_pickup_warehouse_id_warehouses_id_fk" FOREIGN KEY ("pickup_warehouse_id") REFERENCES "public"."warehouses"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "lalamove_quotations" ADD CONSTRAINT "lalamove_quotations_booked_by_users_id_fk" FOREIGN KEY ("booked_by") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "notifications" ADD CONSTRAINT "notifications_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
 ALTER TABLE "order_groups" ADD CONSTRAINT "order_groups_customer_id_customers_id_fk" FOREIGN KEY ("customer_id") REFERENCES "public"."customers"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -829,10 +859,15 @@ CREATE INDEX "customer_return_warehouse_status" ON "customer_returns" USING btre
 CREATE INDEX "customer_return_delivery" ON "customer_returns" USING btree ("assigned_delivery_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_active_driver_slot" ON "deliveries" USING btree ("driver_id","scheduled_date","departure_time") WHERE "deliveries"."status" <> 'cancelled';--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_active_vehicle_slot" ON "deliveries" USING btree ("vehicle_id","scheduled_date","departure_time") WHERE "deliveries"."status" <> 'cancelled';--> statement-breakpoint
+CREATE UNIQUE INDEX "delivery_notification_booking_event_channel" ON "delivery_notifications" USING btree ("booking_id","event_key","channel") WHERE "delivery_notifications"."lalamove_stop_id" is null;--> statement-breakpoint
+CREATE UNIQUE INDEX "delivery_notification_lalamove_stop_event_channel" ON "delivery_notifications" USING btree ("lalamove_stop_id","event_key","channel") WHERE "delivery_notifications"."lalamove_stop_id" is not null;--> statement-breakpoint
 CREATE INDEX "delivery_notification_status_idx" ON "delivery_notifications" USING btree ("status");--> statement-breakpoint
 CREATE INDEX "driver_return_proofs_return_idx" ON "driver_return_proofs" USING btree ("return_id");--> statement-breakpoint
 CREATE INDEX "driver_proofs_stop_idx" ON "driver_stop_proofs" USING btree ("stop_id");--> statement-breakpoint
 CREATE INDEX "driver_sync_receipts_actor_idx" ON "driver_sync_receipts" USING btree ("actor_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "lalamove_stop_active_order_unique" ON "delivery_order_stops" USING btree ("order_id") WHERE "delivery_order_stops"."active" = true;--> statement-breakpoint
+CREATE UNIQUE INDEX "lalamove_booking_order_unique" ON "delivery_order_stops" USING btree ("booking_id","order_id");--> statement-breakpoint
+CREATE INDEX "lalamove_stops_booking_idx" ON "delivery_order_stops" USING btree ("booking_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "lalamove_active_order_unique" ON "delivery_orders" USING btree ("order_id") WHERE "delivery_orders"."active" = true;--> statement-breakpoint
 CREATE UNIQUE INDEX "lalamove_provider_order_unique" ON "delivery_orders" USING btree ("environment","market","lalamove_order_id");--> statement-breakpoint
 CREATE INDEX "notifications_id_idx" ON "notifications" USING btree ("id");--> statement-breakpoint

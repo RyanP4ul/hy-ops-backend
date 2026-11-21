@@ -1,12 +1,15 @@
 import { expect, test } from "bun:test";
 import { Elysia } from "elysia";
-import { orderModel } from "../src/modules/order/model";
+import { orderGroupAssignSchema, orderModel, orderSeparateSchema } from "../src/modules/order/model";
 import { mayAccess } from "../src/modules/auth/policy";
+import { auditTarget } from "../src/utils/audit";
 
 const app = new Elysia()
   .use(orderModel)
   .post("/orders/batch", ({ body }) => body, { body: "order.batch" })
-  .post("/orders/walk-in", ({ body }) => body, { body: "order.walk_in" });
+  .post("/orders/walk-in", ({ body }) => body, { body: "order.walk_in" })
+  .post("/orders/:id/separate", ({ body }) => body, { body: orderSeparateSchema })
+  .post("/orders/groups", ({ body }) => body, { body: orderGroupAssignSchema });
 const order = { warehouse_id: 1, payment_method: "CASH", payment_arrangement: "NET_30", amount_paid: 0, is_custom_shipping: false, customer_address_id: 1, items: [{ inventory_id: 1, quantity: 1 }] };
 const submit = (body: object) => app.handle(new Request("http://localhost/orders/batch", {
   method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
@@ -64,4 +67,63 @@ test("walk-in order model accepts counter sales with optional customer and rejec
   expect(mayAccess("staff", "POST", "/orders/walk-in")).toBe(true);
   expect(mayAccess("driver", "POST", "/orders/walk-in")).toBe(false);
   expect(mayAccess("customer", "POST", "/orders/walk-in")).toBe(false);
+});
+
+test("separate order endpoint validates version, enforces role policy, and maps audit target", async () => {
+  const separate = (body: object) =>
+    app.handle(
+      new Request("http://localhost/orders/42/separate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+
+  expect((await separate({ version: 1 })).status).toBe(200);
+  for (const invalid of [{}, { version: 0 }, { version: -1 }, { version: 1.5 }, { version: "abc" }]) {
+    expect((await separate(invalid)).status).toBe(422);
+  }
+
+  expect(mayAccess("admin", "POST", "/orders/42/separate")).toBe(true);
+  expect(mayAccess("staff", "POST", "/orders/42/separate")).toBe(true);
+  expect(mayAccess("driver", "POST", "/orders/42/separate")).toBe(false);
+  expect(mayAccess("customer", "POST", "/orders/42/separate")).toBe(false);
+  expect(auditTarget("/orders/42/separate")).toEqual({ entityType: "orders", entityId: "42" });
+});
+
+test("group orders endpoint validates payload and enforces role policy", async () => {
+  const group = (body: object) =>
+    app.handle(
+      new Request("http://localhost/orders/groups", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+
+  expect((await group({ orders: [{ id: 1, version: 1 }, { id: 2, version: 1 }] })).status).toBe(200);
+  expect(
+    (
+      await group({
+        orders: [{ id: 3, version: 2 }],
+        target_group_id: "11111111-1111-4111-8111-111111111111",
+      })
+    ).status,
+  ).toBe(200);
+
+  for (const invalid of [
+    { orders: [] },
+    { orders: [{ id: 0, version: 1 }] },
+    { orders: [{ id: 1, version: 0 }] },
+    { orders: [{ id: 1, version: 1 }], target_group_id: "not-a-uuid" },
+  ]) {
+    expect((await group(invalid)).status).toBe(422);
+  }
+
+  expect(mayAccess("admin", "POST", "/orders/groups")).toBe(true);
+  expect(mayAccess("staff", "POST", "/orders/groups")).toBe(true);
+  expect(mayAccess("driver", "POST", "/orders/groups")).toBe(false);
+  expect(mayAccess("customer", "POST", "/orders/groups")).toBe(false);
+  expect(mayAccess("staff", "GET", "/orders/groups/11111111-1111-4111-8111-111111111111/candidates")).toBe(true);
+  expect(mayAccess("driver", "GET", "/orders/groups/11111111-1111-4111-8111-111111111111/candidates")).toBe(false);
 });

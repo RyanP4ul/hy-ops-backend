@@ -331,11 +331,8 @@ export abstract class UserService {
         if (!warehouse) throw new WorkflowError("Choose an active warehouse.");
       }
 
-      const password_hash = data.password
-        ? await bcrypt.hash(data.password, 10)
-        : null;
-
-      if (!password_hash) {
+      const password = data.password || (data.role === "customer" ? crypto.randomUUID() : undefined);
+      if (!password) {
         return {
           errors: {
             password: "Password is required.",
@@ -350,20 +347,22 @@ export abstract class UserService {
         .values({
           name: data.name,
           email: data.email,
-          password_hash: password_hash,
+          password_hash: await bcrypt.hash(password, 10),
           role: data.role,
           created_at: now,
           updated_at: now,
         })
+        .onConflictDoNothing({ target: users.email })
         .returning({
           id: users.id,
           name: users.name,
         });
 
       if (!user) {
-        throw new Error("Failed to create user.");
+        return { errors: { email: "A user with this email already exists." } };
       }
 
+      const result = { id: user.id, message: `User ${user.name} created successfully` };
       switch (data.role) {
         case "staff":
           await tx.insert(staffs).values({
@@ -371,14 +370,18 @@ export abstract class UserService {
             warehouse_id: data.profile?.warehouse_id ?? 0,
           });
           break;
-        case "customer":
+        case "customer": {
           const [customer] = await tx.insert(customers).values({
             user_id: user.id,
             company_name: data.profile?.company_name ?? "",
             phone_number: data.profile?.phone_number ?? "",
-          }).returning({ id: customers.id });
+          }).returning({
+            id: customers.id,
+            company_name: customers.company_name,
+            phone_number: customers.phone_number,
+          });
 
-          await tx.insert(customer_addresses).values({
+          const [address] = await tx.insert(customer_addresses).values({
             customer_id: customer.id,
             address_line: data.profile?.address_line ?? "",
             barangay: data.profile?.barangay ?? "",
@@ -387,8 +390,9 @@ export abstract class UserService {
             postal_code: data.profile?.postal_code ?? "",
             latitude: data.profile?.latitude ?? "0",
             longitude: data.profile?.longitude ?? "0",
-          });
-          break;
+          }).returning();
+          return { ...result, customer: { ...customer, name: user.name, addresses: [address] } };
+        }
         case "driver":
           await tx.insert(drivers).values({
             warehouse_id: data.profile?.warehouse_id ?? 0,
@@ -399,10 +403,7 @@ export abstract class UserService {
           break;
       }
 
-      return {
-        id: user.id,
-        message: `User ${user.name} created successfully`,
-      };
+      return result;
     });
   }
 

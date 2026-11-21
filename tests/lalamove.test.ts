@@ -318,4 +318,234 @@ describe.skipIf(!testUrl)("Lalamove disposable PostgreSQL lifecycle", () => {
     expect(setup.callback_path).toBe("/api/webhooks/lalamove"); expect(setup.last_callback_at).toBeNull(); expect(registrations).toBe(0);
     await service.registerWebhook(admin); expect(registrations).toBe(1);
   });
+  test("multi-stop booking quotes, optimizes stop order, consumes stock once, notifies per stop, and reports cost once", async () => {
+    await sql`update inventory set quantity=20, reserved=7 where id=1`;
+    await sql`insert into orders (order_number,warehouse_id,customer_id,status,stock_reserved,delivery_method,payment_arrangement,shipping_recipient,shipping_phone,shipping_address,shipping_latitude,shipping_longitude)
+      values
+        ('ORDER-M2',1,1,'SCHEDULING',true,'INTERNAL','FULLY_PAID','Recipient Two','09172222222','Address Two',14.62,121.12),
+        ('ORDER-M3',1,1,'SCHEDULING',true,'LALAMOVE','NET_30','Recipient Three','09173333333','Address Three',14.64,121.14)`;
+    await sql`insert into order_items (order_id,inventory_id,quantity,unit_price_snapshot) values (2,1,2,15),(3,1,3,20)`;
+    await sql`insert into invoices (invoice_number,order_id,customer_id,status,issue_date) values ('INV-M2',2,1,'ISSUED',now()),('INV-M3',3,1,'ISSUED',now())`;
+
+    // Batch switch ORDER-M2 to LALAMOVE
+    const switched = await service.setMethodsBatch([{ order_id: 2, version: 1 }], "LALAMOVE", admin);
+    expect(switched.orders).toEqual([{ id: 2, version: 2, delivery_method: "LALAMOVE" }]);
+
+    let lastQuotePayload: any = null;
+    let lastOrderPayload: any = null;
+    provider = {
+      orderId: "9934567890123456789",
+      quotationId: "quote-multi",
+      status: "ASSIGNING_DRIVER",
+      priceBreakdown: { total: "310", currency: "PHP" },
+      metadata: {},
+      shareLink: "https://share.sandbox.lalamove.com/?multi",
+    };
+    let providerStops: any[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v3/cities") return Response.json({ data: [{ locode: "PH MNL", services: [{ key: "SEDAN" }] }] });
+      if (path === "/v3/quotations") {
+        lastQuotePayload = JSON.parse(String(init?.body));
+        // Simulate Lalamove optimizing dropoff order: reverse [1, 2, 3] -> [3, 1, 2]
+        const reqStops = lastQuotePayload.data.stops;
+        const optimized = [
+          { stopId: "p-0", address: reqStops[0].address, coordinates: reqStops[0].coordinates },
+          { stopId: "d-3", address: reqStops[3].address, coordinates: reqStops[3].coordinates },
+          { stopId: "d-1", address: reqStops[1].address, coordinates: reqStops[1].coordinates },
+          { stopId: "d-2", address: reqStops[2].address, coordinates: reqStops[2].coordinates },
+        ];
+        return Response.json({
+          data: {
+            quotationId: "quote-multi",
+            expiresAt: new Date(Date.now() + 300000).toISOString(),
+            serviceType: "SEDAN",
+            stops: optimized,
+            priceBreakdown: provider.priceBreakdown,
+          },
+        });
+      }
+      if (path === "/v3/orders" && init?.method === "POST") {
+        submissions++;
+        lastOrderPayload = JSON.parse(String(init.body));
+        provider.metadata = lastOrderPayload.data.metadata;
+        return Response.json({ data: { ...provider, stops: providerStops } });
+      }
+      if (path.startsWith("/v3/orders/")) {
+        if (init?.method === "DELETE") { provider.status = "CANCELED"; return new Response(null, { status: 204 }); }
+        return Response.json({ data: { ...provider, stops: providerStops } });
+      }
+      throw new Error(`Unexpected provider call ${path}`);
+    }) as typeof fetch;
+
+    const multiQuote = await service.createMultiStopQuotation({
+      order_ids: [1, 2, 3],
+      order_versions: { "1": 1, "2": 2, "3": 1 },
+      pickup_warehouse_id: 1,
+      city: "PH MNL",
+      service_type: "SEDAN",
+      is_route_optimized: true,
+    }, admin);
+
+    expect(lastQuotePayload.data.isRouteOptimized).toBe(true);
+    expect(lastQuotePayload.data.stops).toHaveLength(4);
+    expect(multiQuote.route_reordered).toBe(true);
+    expect(multiQuote.route.dropoffs.map(d => d.order_id)).toEqual([3, 1, 2]);
+    expect(multiQuote.route.dropoffs.map(d => d.stop_id)).toEqual(["d-3", "d-1", "d-2"]);
+
+    const key = crypto.randomUUID();
+    const body = {
+      order_ids: [1, 2, 3],
+      order_versions: { "1": 1, "2": 2, "3": 1 },
+      pickup_warehouse_id: 1,
+      quotation_ref: multiQuote.quotation_ref,
+      idempotency_key: key,
+      package_confirmed: true,
+    };
+    const [b1, b2] = await Promise.all([service.placeMultiStopOrder(body, admin), service.placeMultiStopOrder(body, admin)]);
+    expect(b1.id).toBe(b2.id);
+    expect(submissions).toBe(1);
+    expect(b1.stop_count).toBe(3);
+    expect(b1.stops.map(s => s.order_id)).toEqual([3, 1, 2]);
+    expect(lastOrderPayload.data.recipients.map((r: any) => ({ stopId: r.stopId, name: r.name }))).toEqual([
+      { stopId: "d-3", name: "Recipient Three" },
+      { stopId: "d-1", name: "Recipient" },
+      { stopId: "d-2", name: "Recipient Two" },
+    ]);
+
+    // All 3 orders are now SCHEDULED and blocked from competing bookings
+    expect((await sql`select id, status from orders order by id`).map((r: any) => r.status)).toEqual(["SCHEDULED", "SCHEDULED", "SCHEDULED"]);
+    await expectRejected(service.createQuotation({ order_id: 2, order_version: 3, city: "PH MNL", service_type: "SEDAN" }, admin), "ready");
+
+    // Pickup consumes stock for all 3 orders; Stop 1 (order 3) delivers via POD while others remain IN_TRANSIT
+    provider.status = "PICKED_UP";
+    providerStops = [
+      { stopId: "p-0" },
+      { stopId: "d-3", POD: { status: "DELIVERED", deliveredAt: new Date().toISOString() } },
+      { stopId: "d-1", POD: { status: "PENDING" } },
+      { stopId: "d-2", POD: { status: "PENDING" } },
+    ];
+    await service.refresh(b1.id);
+    expect(await sql`select * from stock_movements where kind='consume'`).toHaveLength(3);
+    expect((await sql`select id, status from orders order by id`).map((r: any) => r.status)).toEqual(["IN_TRANSIT", "IN_TRANSIT", "COMPLETED"]);
+    expect(await sql`select * from delivery_notifications where booking_id=${b1.id}`).toHaveLength(2);
+
+    // Complete remaining stops
+    provider.status = "COMPLETED";
+    providerStops = [
+      { stopId: "p-0" },
+      { stopId: "d-3", POD: { status: "DELIVERED", deliveredAt: new Date().toISOString() } },
+      { stopId: "d-1", POD: { status: "DELIVERED", deliveredAt: new Date().toISOString() } },
+      { stopId: "d-2", POD: { status: "DELIVERED", deliveredAt: new Date().toISOString() } },
+    ];
+    await Promise.all([service.refresh(b1.id), service.refresh(b1.id)]);
+    expect((await sql`select id, status from orders order by id`).map((r: any) => r.status)).toEqual(["COMPLETED", "COMPLETED", "COMPLETED"]);
+    expect(await sql`select * from delivery_notifications where booking_id=${b1.id}`).toHaveLength(6);
+    expect(await sql`select * from delivery_order_stops where booking_id=${b1.id} and active=true`).toHaveLength(0);
+
+    // Production report projects 3 stops sharing one delivery.id so cost (310) is counted once
+    await sql`update delivery_orders set environment='production' where id=${b1.id}`;
+    const { findExternalDeliveries } = require("../src/modules/analysis-reports/repositories/deliveries.repository");
+    const ext = await findExternalDeliveries();
+    expect(ext).toHaveLength(3);
+    expect(new Set(ext.map((r: any) => r.view.id)).size).toBe(1);
+    expect(new Set(ext.map((r: any) => r.stopId)).size).toBe(3);
+    expect(ext[0].view.cost).toBe(310);
+
+    const { stopsFor } = require("../src/modules/analysis-reports/services/datasets");
+    const { DEFAULT_FILTERS } = require("../src/modules/analysis-reports/reports.contract");
+    const reportStops = await stopsFor({ ...DEFAULT_FILTERS, deliveryTypes: ["LALAMOVE"] }, Date.now());
+    expect(reportStops).toHaveLength(3);
+  });
+  test("multi-stop cancellation and definitive failure release all orders cleanly", async () => {
+    await sql`insert into orders (order_number,warehouse_id,customer_id,status,stock_reserved,delivery_method,payment_arrangement,shipping_recipient,shipping_phone,shipping_address,shipping_latitude,shipping_longitude)
+      values ('ORDER-C2',1,1,'SCHEDULING',true,'LALAMOVE','FULLY_PAID','Recipient Two','09172222222','Address Two',14.62,121.12)`;
+    globalThis.fetch = (async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v3/cities") return Response.json({ data: [{ locode: "PH MNL", services: [{ key: "MOTORCYCLE" }] }] });
+      if (path === "/v3/quotations") return Response.json({ data: { quotationId: "q-c", expiresAt: new Date(Date.now() + 300000).toISOString(), serviceType: "MOTORCYCLE", stops: [{ stopId: "p" }, { stopId: "d1" }, { stopId: "d2" }], priceBreakdown: { total: "180", currency: "PHP" } } });
+      if (path === "/v3/orders" && init?.method === "POST") {
+        submissions++;
+        if (mode === "credit") return new Response("no credit", { status: 402 });
+        return Response.json({ data: provider });
+      }
+      if (path.startsWith("/v3/orders/")) {
+        if (init?.method === "DELETE") { provider.status = "CANCELED"; return new Response(null, { status: 204 }); }
+        return Response.json({ data: provider });
+      }
+      throw new Error(`Unexpected ${path}`);
+    }) as typeof fetch;
+
+    const q1 = await service.createMultiStopQuotation({ order_ids: [1, 2], order_versions: { "1": 1, "2": 1 }, pickup_warehouse_id: 1, city: "PH MNL", service_type: "MOTORCYCLE" }, admin);
+    mode = "credit";
+    const failed = await service.placeMultiStopOrder({ order_ids: [1, 2], order_versions: { "1": 1, "2": 1 }, pickup_warehouse_id: 1, quotation_ref: q1.quotation_ref, idempotency_key: crypto.randomUUID(), package_confirmed: true }, admin);
+    expect(failed.booking_state).toBe("FAILED");
+    expect(failed.active).toBe(false);
+    expect(await sql`select * from delivery_order_stops where active=true`).toHaveLength(0);
+
+    mode = "normal";
+    const q2 = await service.createMultiStopQuotation({ order_ids: [1, 2], order_versions: { "1": 1, "2": 1 }, pickup_warehouse_id: 1, city: "PH MNL", service_type: "MOTORCYCLE" }, admin);
+    const activeBooking = await service.placeMultiStopOrder({ order_ids: [1, 2], order_versions: { "1": 1, "2": 1 }, pickup_warehouse_id: 1, quotation_ref: q2.quotation_ref, idempotency_key: crypto.randomUUID(), package_confirmed: true }, admin);
+    expect((await sql`select status from orders order by id`).map((r: any) => r.status)).toEqual(["SCHEDULED", "SCHEDULED"]);
+
+    await service.cancel(activeBooking.id, admin);
+    expect((await sql`select status from orders order by id`).map((r: any) => r.status)).toEqual(["SCHEDULING", "SCHEDULING"]);
+    expect(await sql`select * from delivery_order_stops where active=true`).toHaveLength(0);
+  });
+  test("live driver coordinates refresh safely, throttle within 10s, and surface in liveActive", async () => {
+    let driverCalls = 0;
+    const updatedAt = "2026-11-20T13:15:00Z";
+    provider = {
+      orderId: "5534567890123456789",
+      quotationId: "quote-live",
+      status: "ON_GOING",
+      priceBreakdown: { total: "145", currency: "PHP" },
+      metadata: {},
+      shareLink: "https://share.sandbox.lalamove.com/?live",
+    };
+    globalThis.fetch = (async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v3/cities") return Response.json({ data: [{ locode: "PH MNL", services: [{ key: "MOTORCYCLE" }] }] });
+      if (path === "/v3/quotations") return Response.json({ data: { quotationId: "quote-live", expiresAt: new Date(Date.now() + 300000).toISOString(), serviceType: "MOTORCYCLE", stops: [{ stopId: "p" }, { stopId: "d1" }], priceBreakdown: provider.priceBreakdown } });
+      if (path === "/v3/orders" && init?.method === "POST") {
+        return Response.json({ data: { ...provider, driverId: "drv-88" } });
+      }
+      if (path === `/v3/orders/${provider.orderId}/drivers/drv-88`) {
+        driverCalls++;
+        return Response.json({
+          data: {
+            driverId: "drv-88",
+            name: "Rico",
+            phone: "+639175551234",
+            plateNumber: "ABC 1234",
+            coordinates: { lat: "14.5547", lng: "121.0244", updatedAt },
+          },
+        });
+      }
+      if (path === `/v3/orders/${provider.orderId}`) {
+        return Response.json({ data: { ...provider, driverId: "drv-88" } });
+      }
+      throw new Error(`Unexpected ${path}`);
+    }) as typeof fetch;
+
+    const b = await book();
+    // Force stale last_synced_at so liveActive triggers driver coordinate fetch
+    await sql`update delivery_orders set last_synced_at = now() - interval '30 seconds' where id = ${b.id}`;
+    const live = await service.liveActive(admin);
+    expect(live).toHaveLength(1);
+    expect(live[0].driver).toMatchObject({
+      id: "drv-88",
+      name: "Rico",
+      plate_number: "ABC 1234",
+      coordinates: { lat: 14.5547, lng: 121.0244, updated_at: updatedAt },
+    });
+    expect(live[0].pickup.coordinates).toEqual([121, 14.5]);
+    expect(live[0].stops[0]?.coordinates).toEqual([121.1, 14.6]);
+    expect(driverCalls).toBe(1);
+
+    // Immediate refreshDriverLocation respects 10s cooldown and avoids duplicate provider call
+    const cached = await service.refreshDriverLocation(b.id, admin);
+    expect(cached.driver_coordinates).toEqual({ lat: 14.5547, lng: 121.0244, updated_at: updatedAt });
+    expect(driverCalls).toBe(1);
+  });
 });

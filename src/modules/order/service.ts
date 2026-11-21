@@ -54,9 +54,12 @@ const orderGroupFields = {
 };
 const internalSchedulingEligible = sql`coalesce(${orders.delivery_method}, '') not in ('LALAMOVE', 'WALK_IN')
   and not exists (select 1 from delivery_orders b where b.order_id = ${orders.id} and b.active)
+  and not exists (select 1 from delivery_order_stops s where s.order_id = ${orders.id} and s.active)
   and not exists (select 1 from orders m where m.order_group_id = ${orders.order_group_id}
     and m.status <> 'CANCELLED'
-    and (m.delivery_method in ('LALAMOVE', 'WALK_IN') or exists (select 1 from delivery_orders b where b.order_id = m.id and b.active)))`;
+    and (m.delivery_method in ('LALAMOVE', 'WALK_IN')
+      or exists (select 1 from delivery_orders b where b.order_id = m.id and b.active)
+      or exists (select 1 from delivery_order_stops s where s.order_id = m.id and s.active)))`;
 
 const resolvedCustomerNameSql = sql<string>`case when ${orders.sales_channel} = 'WALK_IN' and coalesce(nullif(trim(${orders.shipping_recipient}), ''), '') <> '' then ${orders.shipping_recipient} else ${users.name} end`;
 
@@ -352,7 +355,7 @@ export abstract class OrderService {
         shipping_address: orders.shipping_address,
         status: orders.status,
         delivery_type: sql<string>`coalesce(${orders.delivery_method}, (select ${deliveries.delivery_type}::text from ${deliveries_stops} inner join ${deliveries} on ${deliveries.id} = ${deliveries_stops.delivery_id} where ${deliveries_stops.order_id} = ${orders.id} order by ${deliveries.id} desc limit 1))`,
-        lalamove_booking: sql<{ id: number; status: string; booking_state: string; active: boolean } | null>`(select json_build_object('id', b.id, 'status', b.status, 'booking_state', b.booking_state, 'active', b.active) from delivery_orders b where b.order_id = ${orders.id} order by b.id desc limit 1)`,
+        lalamove_booking: sql<{ id: number; status: string; booking_state: string; active: boolean; stop_count: number } | null>`(select json_build_object('id', b.id, 'status', b.status, 'booking_state', b.booking_state, 'active', b.active, 'stop_count', b.stop_count) from delivery_orders b where b.order_id = ${orders.id} or exists (select 1 from delivery_order_stops s where s.booking_id = b.id and s.order_id = ${orders.id}) order by b.id desc limit 1)`,
         version: orders.version,
       })
       .from(orders)
@@ -430,6 +433,7 @@ export abstract class OrderService {
         warehouse_id: orders.warehouse_id,
         warehouse_name: warehouses.name,
         delivery_type: latestDeliveryType,
+        customer_id: orders.customer_id,
         customer_name: resolvedCustomerNameSql,
         email: users.email,
         customer_company: customers.company_name,
@@ -590,6 +594,7 @@ export abstract class OrderService {
         warehouse_id: orders.warehouse_id,
         warehouse_name: warehouses.name,
         delivery_type: latestDeliveryType,
+        customer_id: orders.customer_id,
         customer_name: resolvedCustomerNameSql,
         email: users.email,
         customer_company: customers.company_name,
@@ -748,6 +753,7 @@ export abstract class OrderService {
           deliveryTypes.length === 1 && deliveryTypes[0]
             ? deliveryTypes[0]
             : "MULTIPLE",
+        customer_id: first.customer_id,
         customer_name: first.customer_name,
         email: first.email,
         customer_company: first.customer_company,
@@ -1539,6 +1545,514 @@ export abstract class OrderService {
         message: `${eligible.length} ${eligible.length === 1 ? "order" : "orders"} in this group ${eligible.length === 1 ? "is" : "are"} now ready for delivery.`,
       };
     });
+  }
+
+  static async separateOrderFromGroup(orderId: number, version: number) {
+    return await stockTransaction(async (tx) => {
+      const [initial] = await tx
+        .select({
+          id: orders.id,
+          order_group_id: orders.order_group_id,
+        })
+        .from(orders)
+        .where(eq(orders.id, orderId));
+
+      if (!initial) {
+        throw new WorkflowError("Order not found.", 404);
+      }
+
+      if (!initial.order_group_id) {
+        throw new WorkflowError("This order is not part of a grouped order.");
+      }
+
+      const groupId = initial.order_group_id;
+
+      // Lock the group row first, then all members across every warehouse in
+      // deterministic ID order to prevent races with scheduling or concurrent edits.
+      const [groupRow] = await tx
+        .select()
+        .from(order_groups)
+        .where(eq(order_groups.id, groupId))
+        .for("update");
+
+      if (!groupRow) {
+        throw new WorkflowError("Order group not found. Refresh and try again.", 409);
+      }
+
+      const lockedMembers = await tx
+        .select()
+        .from(orders)
+        .where(eq(orders.order_group_id, groupId))
+        .orderBy(asc(orders.id))
+        .for("update");
+
+      const target = lockedMembers.find((member) => member.id === orderId);
+      if (!target) {
+        throw new WorkflowError("This order was already separated from its group. Refresh and try again.", 409);
+      }
+
+      if (target.version !== version) {
+        throw new WorkflowError("Order was updated by another user. Refresh and try again.", 409);
+      }
+
+      const separableStatuses = ["PENDING", "PROCESSING", "SCHEDULING"] as const;
+      if (!separableStatuses.includes(target.status as (typeof separableStatuses)[number])) {
+        throw new WorkflowError(
+          "Only pending, processing, or scheduling orders can be separated from a group.",
+        );
+      }
+
+      const remaining = lockedMembers.filter((member) => member.id !== target.id);
+      const willDissolve = remaining.length <= 1;
+      const lastRemaining = remaining.length === 1 ? remaining[0] : undefined;
+
+      const affectedIds =
+        willDissolve && lastRemaining
+          ? [target.id, lastRemaining.id]
+          : [target.id];
+
+      const [activeStop] = await tx
+        .select({ order_id: deliveries_stops.order_id })
+        .from(deliveries_stops)
+        .innerJoin(deliveries, eq(deliveries.id, deliveries_stops.delivery_id))
+        .where(
+          and(
+            inArray(deliveries_stops.order_id, affectedIds),
+            inArray(deliveries.status, ["scheduled", "in_transit", "returning"]),
+          ),
+        )
+        .limit(1);
+
+      if (activeStop) {
+        throw new WorkflowError(
+          activeStop.order_id === target.id
+            ? "Cannot separate an order that is assigned to an active delivery."
+            : "Cannot dissolve this group while the remaining order is assigned to an active delivery.",
+        );
+      }
+
+      const now = new Date();
+
+      await tx
+        .update(orders)
+        .set({
+          order_group_id: null,
+          order_group_position: null,
+          version: target.version + 1,
+          updated_at: now,
+        })
+        .where(eq(orders.id, target.id));
+
+      if (willDissolve) {
+        const dissolvedOrder = remaining[0] ?? null;
+        if (dissolvedOrder) {
+          await tx
+            .update(orders)
+            .set({
+              order_group_id: null,
+              order_group_position: null,
+              version: dissolvedOrder.version + 1,
+              updated_at: now,
+            })
+            .where(eq(orders.id, dissolvedOrder.id));
+        }
+
+        await tx.delete(order_groups).where(eq(order_groups.id, groupId));
+
+        return {
+          separated_order_id: target.id,
+          separated_order_number: target.order_number,
+          previous_group_id: groupId,
+          previous_group_number: groupRow.group_number,
+          group_dissolved: true,
+          remaining_count: 0,
+          dissolved_order_id: dissolvedOrder?.id ?? null,
+          dissolved_order_number: dissolvedOrder?.order_number ?? null,
+          message: dissolvedOrder
+            ? `Order ${target.order_number} was separated from group ${groupRow.group_number}. Because only 1 order remained, the group was dissolved and ${dissolvedOrder.order_number} is now an independent order.`
+            : `Order ${target.order_number} was separated and group ${groupRow.group_number} was dissolved.`,
+        };
+      }
+
+      const orderedRemaining = [...remaining].sort(
+        (a, b) =>
+          (a.order_group_position ?? Number.MAX_SAFE_INTEGER) -
+            (b.order_group_position ?? Number.MAX_SAFE_INTEGER) || a.id - b.id,
+      );
+
+      // Clear positions first to avoid intermediate collisions on unique(order_group_id, order_group_position).
+      await tx
+        .update(orders)
+        .set({ order_group_position: null })
+        .where(inArray(orders.id, orderedRemaining.map((member) => member.id)));
+
+      for (const [index, member] of orderedRemaining.entries()) {
+        const nextPosition = index + 1;
+        const positionChanged = member.order_group_position !== nextPosition;
+        await tx
+          .update(orders)
+          .set({
+            order_group_position: nextPosition,
+            version: positionChanged ? member.version + 1 : member.version,
+            updated_at: positionChanged ? now : member.updated_at,
+          })
+          .where(eq(orders.id, member.id));
+      }
+
+      return {
+        separated_order_id: target.id,
+        separated_order_number: target.order_number,
+        previous_group_id: groupId,
+        previous_group_number: groupRow.group_number,
+        group_dissolved: false,
+        remaining_count: orderedRemaining.length,
+        dissolved_order_id: null,
+        dissolved_order_number: null,
+        message: `Order ${target.order_number} was separated from group ${groupRow.group_number}. ${orderedRemaining.length} orders remain in the group.`,
+      };
+    });
+  }
+
+  static async groupOrders(
+    items: { id: number; version: number }[],
+    targetGroupId?: string,
+    warehouseId?: number,
+  ) {
+    const uniqueIds = new Set(items.map((item) => item.id));
+    if (uniqueIds.size !== items.length) {
+      throw new WorkflowError("Select distinct orders to group.");
+    }
+
+    const minCount = targetGroupId ? 1 : 2;
+    if (items.length < minCount) {
+      throw new WorkflowError(
+        targetGroupId
+          ? "Select at least 1 order to add to the group."
+          : "Select at least 2 orders to create an order group.",
+      );
+    }
+
+    if (items.length > 25) {
+      throw new WorkflowError("An order group can contain at most 25 orders.");
+    }
+
+    const versionById = new Map(items.map((item) => [item.id, item.version]));
+    const selectedIds = items.map((item) => item.id);
+    const groupableStatuses = ["PENDING", "PROCESSING", "SCHEDULING"] as const;
+    const lockedGroupStatuses = ["SCHEDULED", "IN_TRANSIT", "COMPLETED"] as const;
+
+    return await stockTransaction(async (tx) => {
+      let existingGroup: typeof order_groups.$inferSelect | undefined;
+      if (targetGroupId) {
+        const [groupRow] = await tx
+          .select()
+          .from(order_groups)
+          .where(eq(order_groups.id, targetGroupId))
+          .for("update");
+        if (!groupRow) {
+          throw new WorkflowError("Target order group not found.", 404);
+        }
+        existingGroup = groupRow;
+      }
+
+      const lockedOrders = await tx
+        .select()
+        .from(orders)
+        .where(
+          existingGroup
+            ? or(
+                inArray(orders.id, selectedIds),
+                eq(orders.order_group_id, existingGroup.id),
+              )
+            : inArray(orders.id, selectedIds),
+        )
+        .orderBy(asc(orders.id))
+        .for("update");
+
+      const byId = new Map(lockedOrders.map((row) => [row.id, row]));
+      const selectedOrders: (typeof orders.$inferSelect)[] = [];
+
+      for (const id of selectedIds) {
+        const order = byId.get(id);
+        if (!order) {
+          throw new WorkflowError("One or more selected orders were not found.", 404);
+        }
+        if (warehouseId !== undefined && order.warehouse_id !== warehouseId) {
+          throw new WorkflowError("One or more selected orders do not belong to your warehouse.", 404);
+        }
+        const expectedVersion = versionById.get(id);
+        if (order.version !== expectedVersion) {
+          throw new WorkflowError(
+            `Order ${order.order_number} was updated by another user. Refresh and try again.`,
+            409,
+          );
+        }
+        if (order.order_group_id) {
+          throw new WorkflowError(
+            `Order ${order.order_number} is already part of an order group.`,
+          );
+        }
+        if (
+          !groupableStatuses.includes(
+            order.status as (typeof groupableStatuses)[number],
+          )
+        ) {
+          throw new WorkflowError(
+            "Only pending, processing, or scheduling orders can be grouped.",
+          );
+        }
+        if (order.delivery_method === "WALK_IN") {
+          throw new WorkflowError("Counter walk-in orders cannot be grouped.");
+        }
+        selectedOrders.push(order);
+      }
+
+      const existingMembers = existingGroup
+        ? lockedOrders.filter((row) => row.order_group_id === existingGroup.id)
+        : [];
+
+      if (existingGroup) {
+        if (existingMembers.length === 0) {
+          throw new WorkflowError("Target order group has no orders remaining. Refresh and try again.", 409);
+        }
+        if (
+          warehouseId !== undefined &&
+          !existingMembers.some((member) => member.warehouse_id === warehouseId)
+        ) {
+          throw new WorkflowError("Order group not found in your warehouse.", 404);
+        }
+        if (existingMembers.length + selectedOrders.length > 25) {
+          throw new WorkflowError("An order group can contain at most 25 orders.");
+        }
+        if (
+          existingMembers.some((member) =>
+            lockedGroupStatuses.includes(
+              member.status as (typeof lockedGroupStatuses)[number],
+            ),
+          )
+        ) {
+          throw new WorkflowError(
+            "Cannot add orders to a group that already has scheduled, in-transit, or completed orders.",
+          );
+        }
+      }
+
+      const customerId = existingGroup
+        ? existingGroup.customer_id
+        : selectedOrders[0]?.customer_id;
+      if (customerId === undefined) {
+        throw new WorkflowError("Select at least 2 orders to create an order group.");
+      }
+
+      if (selectedOrders.some((order) => order.customer_id !== customerId)) {
+        throw new WorkflowError(
+          "Only orders belonging to the same customer can be grouped together.",
+        );
+      }
+
+      const [customerUser] = await tx
+        .select({ email: users.email })
+        .from(customers)
+        .innerJoin(users, eq(users.id, customers.user_id))
+        .where(eq(customers.id, customerId))
+        .limit(1);
+
+      if (!customerUser) {
+        throw new WorkflowError("Customer not found.", 404);
+      }
+      if (customerUser.email === WALK_IN_SYSTEM_EMAIL) {
+        throw new WorkflowError("Anonymous walk-in orders cannot be grouped.");
+      }
+
+      const affectedIds = [
+        ...selectedOrders.map((order) => order.id),
+        ...existingMembers.map((member) => member.id),
+      ];
+
+      const [activeStop] = await tx
+        .select({ order_id: deliveries_stops.order_id })
+        .from(deliveries_stops)
+        .innerJoin(deliveries, eq(deliveries.id, deliveries_stops.delivery_id))
+        .where(
+          and(
+            inArray(deliveries_stops.order_id, affectedIds),
+            inArray(deliveries.status, ["scheduled", "in_transit", "returning"]),
+          ),
+        )
+        .limit(1);
+
+      if (activeStop) {
+        throw new WorkflowError(
+          "Orders assigned to an active delivery cannot be grouped.",
+        );
+      }
+
+      const now = new Date();
+      const orderedSelected = [...selectedOrders].sort((a, b) => a.id - b.id);
+
+      let targetGroup = existingGroup;
+      let startPosition = 1;
+
+      if (!targetGroup) {
+        const [createdGroup] = await tx
+          .insert(order_groups)
+          .values({
+            group_number: `OG-${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`,
+            customer_id: customerId,
+          })
+          .returning();
+        if (!createdGroup) {
+          throw new WorkflowError("Unable to create order group.", 500);
+        }
+        targetGroup = createdGroup;
+      } else {
+        startPosition =
+          existingMembers.reduce(
+            (max, member) => Math.max(max, member.order_group_position ?? 0),
+            0,
+          ) + 1;
+      }
+
+      for (const [index, order] of orderedSelected.entries()) {
+        await tx
+          .update(orders)
+          .set({
+            order_group_id: targetGroup.id,
+            order_group_position: startPosition + index,
+            version: order.version + 1,
+            updated_at: now,
+          })
+          .where(eq(orders.id, order.id));
+      }
+
+      const totalMembers = existingMembers.length + orderedSelected.length;
+
+      return {
+        group_id: targetGroup.id,
+        group_number: targetGroup.group_number,
+        customer_id: customerId,
+        added_order_ids: orderedSelected.map((order) => order.id),
+        total_members: totalMembers,
+        created: !existingGroup,
+        message: existingGroup
+          ? `Added ${orderedSelected.length} ${orderedSelected.length === 1 ? "order" : "orders"} to group ${targetGroup.group_number} (${totalMembers} orders total).`
+          : `Grouped ${totalMembers} orders under ${targetGroup.group_number}.`,
+      };
+    });
+  }
+
+  static async getGroupCandidates(groupId: string, warehouseId?: number) {
+    const [groupRow] = await db
+      .select({
+        id: order_groups.id,
+        group_number: order_groups.group_number,
+        customer_id: order_groups.customer_id,
+        customer_name: users.name,
+        customer_company: customers.company_name,
+        customer_email: users.email,
+      })
+      .from(order_groups)
+      .innerJoin(customers, eq(customers.id, order_groups.customer_id))
+      .innerJoin(users, eq(users.id, customers.user_id))
+      .where(eq(order_groups.id, groupId))
+      .limit(1);
+
+    if (!groupRow) {
+      throw new WorkflowError("Order group not found.", 404);
+    }
+
+    const existingMembers = await db
+      .select({
+        id: orders.id,
+        warehouse_id: orders.warehouse_id,
+        status: orders.status,
+      })
+      .from(orders)
+      .where(eq(orders.order_group_id, groupId));
+
+    if (!existingMembers.length) {
+      throw new WorkflowError("Order group not found.", 404);
+    }
+
+    if (
+      warehouseId !== undefined &&
+      !existingMembers.some((member) => member.warehouse_id === warehouseId)
+    ) {
+      throw new WorkflowError("Order group not found in your warehouse.", 404);
+    }
+
+    const lockedGroupStatuses = ["SCHEDULED", "IN_TRANSIT", "COMPLETED"];
+    if (
+      groupRow.customer_email === WALK_IN_SYSTEM_EMAIL ||
+      existingMembers.some((member) => lockedGroupStatuses.includes(member.status))
+    ) {
+      return {
+        group_id: groupRow.id,
+        group_number: groupRow.group_number,
+        customer_id: groupRow.customer_id,
+        customer_name: groupRow.customer_name,
+        customer_company: groupRow.customer_company,
+        current_size: existingMembers.length,
+        max_size: 25,
+        candidates: [],
+      };
+    }
+
+    const rawCandidates = await db
+      .select({
+        id: orders.id,
+        order_number: orders.order_number,
+        status: orders.status,
+        version: orders.version,
+        warehouse_id: orders.warehouse_id,
+        warehouse_name: warehouses.name,
+        shipping_address: orders.shipping_address,
+        delivery_type: sql<string>`coalesce(${orders.delivery_method}, 'INTERNAL')`,
+        item_count: sql<number>`(select count(*)::int from ${order_items} where ${order_items.order_id} = ${orders.id})`.mapWith(Number),
+        total_quantity: sql<number>`coalesce((select sum(${order_items.quantity})::int from ${order_items} where ${order_items.order_id} = ${orders.id}), 0)`.mapWith(Number),
+        total: sql<string | null>`(
+          select case
+            when count(*) > 0 and bool_and(${order_items.unit_price_snapshot} is not null)
+            then sum(${order_items.quantity} * ${order_items.unit_price_snapshot})
+            else null
+          end
+          from ${order_items}
+          where ${order_items.order_id} = ${orders.id}
+        )`,
+      })
+      .from(orders)
+      .leftJoin(warehouses, eq(orders.warehouse_id, warehouses.id))
+      .where(
+        and(
+          eq(orders.customer_id, groupRow.customer_id),
+          sql`${orders.order_group_id} is null`,
+          inArray(orders.status, ["PENDING", "PROCESSING", "SCHEDULING"]),
+          sql`coalesce(${orders.delivery_method}, '') <> 'WALK_IN'`,
+          warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId),
+          sql`not exists (
+            select 1 from deliveries_stops ds
+            inner join deliveries d on d.id = ds.delivery_id
+            where ds.order_id = ${orders.id}
+              and d.status in ('scheduled', 'in_transit', 'returning')
+          )`,
+        ),
+      )
+      .orderBy(desc(orders.id))
+      .limit(50);
+
+    return {
+      group_id: groupRow.id,
+      group_number: groupRow.group_number,
+      customer_id: groupRow.customer_id,
+      customer_name: groupRow.customer_name,
+      customer_company: groupRow.customer_company,
+      current_size: existingMembers.length,
+      max_size: 25,
+      candidates: rawCandidates.map((row) => ({
+        ...row,
+        total: row.total === null ? null : Number(row.total),
+      })),
+    };
   }
 
   static async cancelOrder(orderId: number, version: number) {

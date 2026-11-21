@@ -3,6 +3,7 @@ import { db } from "../../db";
 import {
   deliveries_stops,
   delivery_notifications,
+  delivery_order_stops,
   orders,
   delivery_orders,
 } from "../../db/schema";
@@ -21,17 +22,38 @@ async function sendNotification(
   emailSender: EmailSender,
 ) {
   try {
-    const [delivery] = job.booking_id ? await db.select({ orderId: orders.id, orderNumber: orders.order_number,
-      status: delivery_orders.status }).from(delivery_orders).innerJoin(orders, eq(orders.id, delivery_orders.order_id))
-      .where(eq(delivery_orders.id, job.booking_id)) : await db
-      .select({
-        orderId: orders.id,
-        orderNumber: orders.order_number,
-        status: deliveries_stops.status,
-      })
-      .from(deliveries_stops)
-      .innerJoin(orders, eq(orders.id, deliveries_stops.order_id))
-      .where(eq(deliveries_stops.id, job.stop_id ?? -1));
+    const [delivery] = job.lalamove_stop_id
+      ? await db
+          .select({
+            orderId: orders.id,
+            orderNumber: orders.order_number,
+            status: delivery_order_stops.delivered_at,
+            bookingStatus: delivery_orders.status,
+          })
+          .from(delivery_order_stops)
+          .innerJoin(delivery_orders, eq(delivery_orders.id, delivery_order_stops.booking_id))
+          .innerJoin(orders, eq(orders.id, delivery_order_stops.order_id))
+          .where(eq(delivery_order_stops.id, job.lalamove_stop_id))
+          .then((rows) =>
+            rows.map((row) => ({
+              orderId: row.orderId,
+              orderNumber: row.orderNumber,
+              status: row.status ? "delivered" : row.bookingStatus,
+            })),
+          )
+      : job.booking_id
+        ? await db.select({ orderId: orders.id, orderNumber: orders.order_number,
+            status: delivery_orders.status }).from(delivery_orders).innerJoin(orders, eq(orders.id, delivery_orders.order_id))
+            .where(eq(delivery_orders.id, job.booking_id))
+        : await db
+            .select({
+              orderId: orders.id,
+              orderNumber: orders.order_number,
+              status: deliveries_stops.status,
+            })
+            .from(deliveries_stops)
+            .innerJoin(orders, eq(orders.id, deliveries_stops.order_id))
+            .where(eq(deliveries_stops.id, job.stop_id ?? -1));
 
     if (!delivery) throw new Error("Delivery stop is unavailable.");
     if (job.event_type === "delivered" && !["delivered", "COMPLETED"].includes(delivery.status))

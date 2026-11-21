@@ -1490,4 +1490,411 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     expect((await sql`select quantity,reserved from inventory where id=${item.id}`)[0]).toMatchObject({ quantity: 250, reserved: 200 });
   });
 
+  test("separating an order from a 3-order group keeps 2 re-sequenced orders and auto-dissolves at 1 remaining while preserving all order data", async () => {
+    await seed();
+    const [item] = await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 50 });
+
+    const created = await OrderService.createOrders({
+      customer_id: 1,
+      payment_mode: "COMBINED",
+      payment: {
+        payment_method: "BANK_TRANSFER",
+        payment_type: "BDO",
+        amount_paid: 50,
+        reference_number: "COMBINED-SEP-01",
+      },
+      orders: [
+        {
+          warehouse_id: 1,
+          notes: "First grouped order",
+          delivery_type: "INTERNAL",
+          is_custom_shipping: false,
+          customer_address_id: 1,
+          items: [{ inventory_id: item.id, quantity: 1 }],
+        },
+        {
+          warehouse_id: 1,
+          notes: "Second grouped order",
+          delivery_type: "INTERNAL",
+          is_custom_shipping: false,
+          customer_address_id: 1,
+          items: [{ inventory_id: item.id, quantity: 2 }],
+        },
+        {
+          warehouse_id: 1,
+          notes: "Third grouped order",
+          delivery_type: "INTERNAL",
+          is_custom_shipping: false,
+          customer_address_id: 1,
+          items: [{ inventory_id: item.id, quantity: 3 }],
+        },
+      ],
+    });
+    expect(created).toHaveLength(3);
+    const [first, second, third] = created;
+
+    // Give each order a distinct pre-dispatch status to verify status & invoice preservation.
+    await OrderService.processOrder(second.id, 1);
+    await OrderService.processOrder(third.id, 1);
+    await OrderService.deliveryOrder(third.id, 2);
+
+    const requireOrder = async (id: number) => {
+      const detail = await OrderService.getOrderById(id);
+      if (!detail) throw new Error(`Missing order ${id}`);
+      return detail;
+    };
+
+    const beforeFirst = await requireOrder(first.id);
+    const beforeSecond = await requireOrder(second.id);
+    const beforeThird = await requireOrder(third.id);
+    expect(beforeFirst.order_group_id).toBeTruthy();
+    expect(beforeFirst.order_group_size).toBe(3);
+    expect(beforeSecond.status).toBe("PROCESSING");
+    expect(beforeThird.status).toBe("SCHEDULING");
+
+    // 1) Separate order #1 from the 3-order group -> 2 orders remain (#1, #2).
+    const firstSep = await OrderService.separateOrderFromGroup(first.id, beforeFirst.version);
+    expect(firstSep).toMatchObject({
+      separated_order_id: first.id,
+      previous_group_id: beforeFirst.order_group_id,
+      group_dissolved: false,
+      remaining_count: 2,
+      dissolved_order_id: null,
+    });
+
+    const afterFirst = await requireOrder(first.id);
+    const afterSecond = await requireOrder(second.id);
+    const afterThird = await requireOrder(third.id);
+
+    expect(afterFirst.order_group_id).toBeNull();
+    expect(afterFirst.order_group_position).toBeNull();
+    expect(afterFirst.group_members).toHaveLength(0);
+    expect(afterFirst.status).toBe("PENDING");
+    expect(afterFirst.notes).toBe("First grouped order");
+    expect(afterFirst.tracking_token).toBe(beforeFirst.tracking_token);
+    expect(afterFirst.items).toEqual(beforeFirst.items);
+    expect(afterFirst.combined_payment).toEqual(beforeFirst.combined_payment);
+
+    expect(afterSecond.order_group_id).toBe(beforeFirst.order_group_id);
+    expect(afterSecond.order_group_position).toBe(1);
+    expect(afterSecond.order_group_size).toBe(2);
+    expect(afterThird.order_group_id).toBe(beforeFirst.order_group_id);
+    expect(afterThird.order_group_position).toBe(2);
+    expect(afterThird.order_group_size).toBe(2);
+
+    const groupedAfterFirst = await OrderService.getGroupedOrders(0, 10);
+    expect(groupedAfterFirst.total).toBe(2);
+    expect(groupedAfterFirst.rows.filter((r) => r.entry_type === "GROUP")).toHaveLength(1);
+    expect(groupedAfterFirst.rows.filter((r) => r.entry_type === "SINGLE")).toHaveLength(1);
+
+    // 2) Separate order #2 from the 2-order group -> group dissolves automatically and order #3 becomes independent.
+    const secondSep = await OrderService.separateOrderFromGroup(second.id, afterSecond.version);
+    expect(secondSep).toMatchObject({
+      separated_order_id: second.id,
+      previous_group_id: beforeFirst.order_group_id,
+      group_dissolved: true,
+      remaining_count: 0,
+      dissolved_order_id: third.id,
+    });
+
+    expect(await sql`select * from order_groups`).toHaveLength(0);
+
+    const finalSecond = await requireOrder(second.id);
+    const finalThird = await requireOrder(third.id);
+    expect(finalSecond.order_group_id).toBeNull();
+    expect(finalSecond.order_group_position).toBeNull();
+    expect(finalSecond.status).toBe("PROCESSING");
+    expect(finalSecond.notes).toBe("Second grouped order");
+    expect(finalSecond.items).toEqual(beforeSecond.items);
+    expect(finalSecond.combined_payment).toEqual(beforeSecond.combined_payment);
+
+    expect(finalThird.order_group_id).toBeNull();
+    expect(finalThird.order_group_position).toBeNull();
+    expect(finalThird.status).toBe("SCHEDULING");
+    expect(finalThird.notes).toBe("Third grouped order");
+    expect(finalThird.items).toEqual(beforeThird.items);
+    expect(finalThird.combined_payment).toEqual(beforeThird.combined_payment);
+    expect(finalThird.invoice_number).toBe(beforeThird.invoice_number);
+
+    const groupedFinal = await OrderService.getGroupedOrders(0, 10);
+    expect(groupedFinal.total).toBe(3);
+    expect(groupedFinal.rows.every((r) => r.entry_type === "SINGLE")).toBe(true);
+    expect((await sql`select quantity,reserved from inventory where id=${item.id}`)[0]).toMatchObject({ quantity: 50, reserved: 6 });
+    expect(await sql`select * from payment_groups`).toHaveLength(1);
+    expect(await sql`select * from payment_group_allocations`).toHaveLength(3);
+  });
+
+  test("order separation enforces guardrails, handles cross-warehouse groups, unblocks scheduling, and serializes concurrent requests", async () => {
+    await seed();
+    await sql`insert into warehouses (name,street_address,city,state,zip_code,created_at,updated_at)
+      values ('Second Warehouse','2nd Street','City','Province','0001',0,0)`;
+    await sql`insert into users (email,name,password_hash,role,created_at,updated_at) values ('driver@example.test','Driver','fixture','driver',0,0)`;
+    await sql`insert into drivers (user_id,warehouse_id,phone_number) values (4,1,'09000000000')`;
+    await sql`insert into vehicles (warehouse_id,plate_number,created_at,updated_at) values (1,'SEP-100',0,0)`;
+
+    const [wh1Inv] = await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 30 });
+    const [wh2Inv] = await InventoryService.createInventory({ warehouse_id: 2, product_variant_id: 1, quantity: 30 });
+
+    // Cross-warehouse 3-order group: 1 in WH-1 (SCHEDULING), 2 in WH-2 (PENDING, PENDING).
+    const crossOrders = await OrderService.createOrders({
+      customer_id: 1,
+      orders: [
+        { warehouse_id: 1, delivery_type: "INTERNAL", payment_method: "CASH", payment_arrangement: "NET_30", amount_paid: 0, is_custom_shipping: false, customer_address_id: 1, items: [{ inventory_id: wh1Inv.id, quantity: 1 }] },
+        { warehouse_id: 2, delivery_type: "INTERNAL", payment_method: "CASH", payment_arrangement: "NET_30", amount_paid: 0, is_custom_shipping: false, customer_address_id: 1, items: [{ inventory_id: wh2Inv.id, quantity: 1 }] },
+        { warehouse_id: 2, delivery_type: "INTERNAL", payment_method: "CASH", payment_arrangement: "NET_30", amount_paid: 0, is_custom_shipping: false, customer_address_id: 1, items: [{ inventory_id: wh2Inv.id, quantity: 1 }] },
+      ],
+    });
+    const [wh1Order, wh2OrderA, wh2OrderB] = crossOrders;
+    await OrderService.processOrder(wh1Order.id, 1);
+    await OrderService.deliveryOrder(wh1Order.id, 2);
+
+    // Before separation, WH-1 order cannot be scheduled independently because it is in a cross-warehouse group.
+    await expect(
+      DeliveryService.createDelivery({
+        order_ids: [wh1Order.id],
+        scheduled_date: "2099-01-01",
+        scheduled_time: "09:00",
+        delivery_type: "INTERNAL",
+        driver_id: 4,
+        vehicle_id: 1,
+        delivery_allowance: 0,
+        fuel: 0,
+        toll: 0,
+      }),
+    ).rejects.toThrow("All orders in this group");
+
+    // Stale version fails with 409.
+    await expect(OrderService.separateOrderFromGroup(wh1Order.id, 1)).rejects.toThrow("updated by another user");
+
+    const requireOrder = async (id: number) => {
+      const detail = await OrderService.getOrderById(id);
+      if (!detail) throw new Error(`Missing order ${id}`);
+      return detail;
+    };
+
+    // Separating WH-1 order leaves WH-2's 2-order group intact (re-sequenced #1, #2).
+    const wh1Detail = await requireOrder(wh1Order.id);
+    const sep1 = await OrderService.separateOrderFromGroup(wh1Order.id, wh1Detail.version);
+    expect(sep1.group_dissolved).toBe(false);
+    expect(sep1.remaining_count).toBe(2);
+
+    // Separating an already-independent order fails cleanly.
+    const wh1After = await requireOrder(wh1Order.id);
+    await expect(OrderService.separateOrderFromGroup(wh1Order.id, wh1After.version)).rejects.toThrow("not part of a grouped order");
+
+    // Now WH-1 order can be scheduled independently.
+    const delivery = await DeliveryService.createDelivery({
+      order_ids: [wh1Order.id],
+      scheduled_date: "2099-01-01",
+      scheduled_time: "09:00",
+      delivery_type: "INTERNAL",
+      driver_id: 4,
+      vehicle_id: 1,
+      delivery_allowance: 0,
+      fuel: 0,
+      toll: 0,
+    });
+    expect(delivery.id).toBeGreaterThan(0);
+
+    // Concurrent separation of the remaining 2 WH-2 orders: exactly 1 succeeds and dissolves the group.
+    const detailA = await requireOrder(wh2OrderA.id);
+    const detailB = await requireOrder(wh2OrderB.id);
+    expect(detailA.order_group_position).toBe(1);
+    expect(detailB.order_group_position).toBe(2);
+
+    const outcomes = await Promise.allSettled([
+      OrderService.separateOrderFromGroup(wh2OrderA.id, detailA.version),
+      OrderService.separateOrderFromGroup(wh2OrderB.id, detailB.version),
+    ]);
+    expect(outcomes.filter((o) => o.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((o) => o.status === "rejected")).toHaveLength(1);
+    expect(await sql`select * from order_groups`).toHaveLength(0);
+
+    // Scheduled orders in a group cannot be separated.
+    const [gA, gB] = await OrderService.createOrders({
+      customer_id: 1,
+      orders: [
+        { warehouse_id: 1, delivery_type: "INTERNAL", payment_method: "CASH", payment_arrangement: "NET_30", amount_paid: 0, is_custom_shipping: false, customer_address_id: 1, items: [{ inventory_id: wh1Inv.id, quantity: 1 }] },
+        { warehouse_id: 1, delivery_type: "INTERNAL", payment_method: "CASH", payment_arrangement: "NET_30", amount_paid: 0, is_custom_shipping: false, customer_address_id: 1, items: [{ inventory_id: wh1Inv.id, quantity: 1 }] },
+      ],
+    });
+    await sql`insert into users (email,name,password_hash,role,created_at,updated_at) values ('driver2@example.test','Driver 2','fixture','driver',0,0)`;
+    await sql`insert into drivers (user_id,warehouse_id,phone_number) values (5,1,'09000000001')`;
+    await sql`insert into vehicles (warehouse_id,plate_number,created_at,updated_at) values (1,'SEP-200',0,0)`;
+    const secondGroupId = (await requireOrder(gA.id)).order_group_id;
+    if (!secondGroupId) throw new Error("Missing second order group");
+    await OrderService.processOrderGroup(secondGroupId);
+    await OrderService.deliveryOrderGroup(secondGroupId);
+    await DeliveryService.createDelivery({
+      order_ids: [gA.id, gB.id],
+      scheduled_date: "2099-01-02",
+      scheduled_time: "09:00",
+      delivery_type: "INTERNAL",
+      driver_id: 5,
+      vehicle_id: 2,
+      delivery_allowance: 0,
+      fuel: 0,
+      toll: 0,
+    });
+    const scheduledA = await requireOrder(gA.id);
+    expect(scheduledA.status).toBe("SCHEDULED");
+    await expect(OrderService.separateOrderFromGroup(gA.id, scheduledA.version)).rejects.toThrow("Only pending, processing, or scheduling orders");
+  });
+
+  test("grouping orders enforces same customer only, appends to existing groups, filters candidates, and preserves order data", async () => {
+    await seed();
+    // Add a second customer to verify strict same-customer enforcement.
+    await sql`insert into users (email,name,password_hash,role,created_at,updated_at) values ('c2@example.test','Second Customer','fixture','customer',0,0)`;
+    await sql`insert into customers (user_id,company_name,phone_number) values (4,'Second Co','09000000009')`;
+    await sql`insert into customer_addresses (customer_id,address_line,barangay,city_municipality,province,latitude,longitude) values (2,'456 Other St','Other Barangay','Other City','Other Province','14.6','121.2')`;
+
+    const [inv] = await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 60 });
+
+    const c1Order1 = await OrderService.createOrder({
+      warehouse_id: 1,
+      customer_id: 1,
+      notes: "C1 order one",
+      delivery_type: "INTERNAL",
+      payment_method: "CASH",
+      payment_arrangement: "NET_30",
+      amount_paid: 0,
+      is_custom_shipping: false,
+      customer_address_id: 1,
+      items: [{ inventory_id: inv.id, quantity: 1 }],
+    });
+    const c1Order2 = await OrderService.createOrder({
+      warehouse_id: 1,
+      customer_id: 1,
+      notes: "C1 order two",
+      delivery_type: "INTERNAL",
+      payment_method: "CASH",
+      payment_arrangement: "NET_30",
+      amount_paid: 0,
+      is_custom_shipping: false,
+      customer_address_id: 1,
+      items: [{ inventory_id: inv.id, quantity: 2 }],
+    });
+    const c1Order3 = await OrderService.createOrder({
+      warehouse_id: 1,
+      customer_id: 1,
+      notes: "C1 order three",
+      delivery_type: "INTERNAL",
+      payment_method: "CASH",
+      payment_arrangement: "NET_30",
+      amount_paid: 0,
+      is_custom_shipping: false,
+      customer_address_id: 1,
+      items: [{ inventory_id: inv.id, quantity: 3 }],
+    });
+    const c2Order1 = await OrderService.createOrder({
+      warehouse_id: 1,
+      customer_id: 2,
+      notes: "C2 different customer",
+      delivery_type: "INTERNAL",
+      payment_method: "CASH",
+      payment_arrangement: "NET_30",
+      amount_paid: 0,
+      is_custom_shipping: false,
+      customer_address_id: 2,
+      items: [{ inventory_id: inv.id, quantity: 1 }],
+    });
+
+    // Move order 2 to PROCESSING and order 3 to SCHEDULING to confirm statuses & invoices stay intact.
+    await OrderService.processOrder(c1Order2.id, 1);
+    await OrderService.processOrder(c1Order3.id, 1);
+    await OrderService.deliveryOrder(c1Order3.id, 2);
+
+    const requireOrder = async (id: number) => {
+      const detail = await OrderService.getOrderById(id);
+      if (!detail) throw new Error(`Missing order ${id}`);
+      return detail;
+    };
+
+    const d1 = await requireOrder(c1Order1.id);
+    const d2 = await requireOrder(c1Order2.id);
+    const d3 = await requireOrder(c1Order3.id);
+    const dc2 = await requireOrder(c2Order1.id);
+
+    // Grouping orders from different customers must be rejected.
+    await expect(
+      OrderService.groupOrders([
+        { id: d1.id, version: d1.version },
+        { id: dc2.id, version: dc2.version },
+      ]),
+    ).rejects.toThrow("same customer");
+
+    // Anonymous walk-in guest orders cannot be grouped even though they share the system walk-in customer.
+    const guest1 = await OrderService.createWalkInOrder(walkInDelivery(inv.id, { items: [{ inventory_id: inv.id, quantity: 1 }], amount_tendered: 12.34 }), 1);
+    const guest2 = await OrderService.createWalkInOrder(walkInDelivery(inv.id, { shipping_recipient: "Other Guest", items: [{ inventory_id: inv.id, quantity: 1 }], amount_tendered: 12.34 }), 1);
+    await expect(
+      OrderService.groupOrders([
+        { id: guest1.id, version: 1 },
+        { id: guest2.id, version: 1 },
+      ]),
+    ).rejects.toThrow("Anonymous walk-in orders cannot be grouped");
+
+    // Grouping 2 independent orders of the SAME customer succeeds and preserves all order details.
+    const createdGroup = await OrderService.groupOrders([
+      { id: d1.id, version: d1.version },
+      { id: d2.id, version: d2.version },
+    ]);
+    expect(createdGroup).toMatchObject({
+      customer_id: 1,
+      total_members: 2,
+      created: true,
+      added_order_ids: [d1.id, d2.id],
+    });
+
+    const after1 = await requireOrder(d1.id);
+    const after2 = await requireOrder(d2.id);
+    expect(after1.order_group_id).toBe(createdGroup.group_id);
+    expect(after1.order_group_position).toBe(1);
+    expect(after1.status).toBe("PENDING");
+    expect(after1.notes).toBe("C1 order one");
+    expect(after1.items).toEqual(d1.items);
+
+    expect(after2.order_group_id).toBe(createdGroup.group_id);
+    expect(after2.order_group_position).toBe(2);
+    expect(after2.status).toBe("PROCESSING");
+    expect(after2.notes).toBe("C1 order two");
+    expect(after2.items).toEqual(d2.items);
+
+    // Candidate list for the existing group ONLY returns independent orders for customer 1 (excludes customer 2 & walk-ins).
+    const candidates = await OrderService.getGroupCandidates(createdGroup.group_id);
+    expect(candidates.customer_id).toBe(1);
+    expect(candidates.current_size).toBe(2);
+    expect(candidates.candidates.map((c) => c.id)).toEqual([d3.id]);
+
+    // Adding a different customer's order into the existing group must fail.
+    await expect(
+      OrderService.groupOrders([{ id: dc2.id, version: dc2.version }], createdGroup.group_id),
+    ).rejects.toThrow("same customer");
+
+    // Adding same-customer order #3 into the existing group succeeds at position 3 and preserves SCHEDULING + invoice.
+    const appended = await OrderService.groupOrders(
+      [{ id: d3.id, version: d3.version }],
+      createdGroup.group_id,
+    );
+    expect(appended).toMatchObject({
+      group_id: createdGroup.group_id,
+      total_members: 3,
+      created: false,
+      added_order_ids: [d3.id],
+    });
+
+    const after3 = await requireOrder(d3.id);
+    expect(after3.order_group_id).toBe(createdGroup.group_id);
+    expect(after3.order_group_position).toBe(3);
+    expect(after3.order_group_size).toBe(3);
+    expect(after3.status).toBe("SCHEDULING");
+    expect(after3.invoice_number).toBe(d3.invoice_number);
+    expect(after3.items).toEqual(d3.items);
+
+    // getGroupedOrders exposes customer_id on both group and single rows.
+    const groupedView = await OrderService.getGroupedOrders(0, 10);
+    const groupEntry = groupedView.rows.find((row) => row.entry_type === "GROUP");
+    expect(groupEntry?.customer_id).toBe(1);
+    expect(groupEntry?.order_group_size).toBe(3);
+  });
+
 });

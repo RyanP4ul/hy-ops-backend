@@ -1,13 +1,17 @@
 import { users } from "./users";
 import { orders } from "./order";
+import { warehouses } from "./warehouses";
 import { sql } from "drizzle-orm";
-import { integer, pgTable, text, jsonb, numeric, timestamp, uuid, boolean, uniqueIndex } from "drizzle-orm/pg-core";
+import { index, integer, pgTable, text, jsonb, numeric, timestamp, uuid, boolean, uniqueIndex } from "drizzle-orm/pg-core";
 
 // export const pod_enum = pgEnum("pod_enum", ["PENDING", "DELIVERED", "SIGNED", "FAILED"]);
 
 export const delivery_orders = pgTable("delivery_orders", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
   order_id: integer().references(() => orders.id, { onDelete: "restrict" }),
+  pickup_warehouse_id: integer("pickup_warehouse_id").references(() => warehouses.id, { onDelete: "restrict" }),
+  is_route_optimized: boolean("is_route_optimized").notNull().default(false),
+  stop_count: integer("stop_count").notNull().default(1),
   environment: text().notNull().default("sandbox"),
   market: text().notNull().default("PH"),
   booking_state: text().notNull().default("CONFIRMED"),
@@ -57,9 +61,35 @@ export const delivery_orders = pgTable("delivery_orders", {
 }, (table) => [uniqueIndex("lalamove_active_order_unique").on(table.order_id).where(sql`${table.active} = true`),
   uniqueIndex("lalamove_provider_order_unique").on(table.environment, table.market, table.lalamove_order_id)]);
 
+export const delivery_order_stops = pgTable("delivery_order_stops", {
+  id: integer().primaryKey().generatedAlwaysAsIdentity(),
+  booking_id: integer("booking_id").notNull().references(() => delivery_orders.id, { onDelete: "cascade" }),
+  order_id: integer("order_id").notNull().references(() => orders.id, { onDelete: "restrict" }),
+  stop_index: integer("stop_index").notNull(),
+  lalamove_stop_id: text("lalamove_stop_id"),
+  recipient_name: text("recipient_name").notNull(),
+  recipient_phone: text("recipient_phone").notNull(),
+  dropoff_address: text("dropoff_address").notNull(),
+  dropoff_lat: numeric("dropoff_lat", { precision: 10, scale: 6 }),
+  dropoff_lng: numeric("dropoff_lng", { precision: 10, scale: 6 }),
+  active: boolean("active").notNull().default(false),
+  pod_status: text("pod_status"),
+  delivered_at: timestamp("delivered_at", { withTimezone: true }),
+  created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updated_at: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex("lalamove_stop_active_order_unique").on(table.order_id).where(sql`${table.active} = true`),
+  uniqueIndex("lalamove_booking_order_unique").on(table.booking_id, table.order_id),
+  index("lalamove_stops_booking_idx").on(table.booking_id),
+]);
+
 export const lalamove_quotations = pgTable("lalamove_quotations", {
   id: uuid().primaryKey().defaultRandom(),
   order_id: integer().notNull().references(() => orders.id, { onDelete: "restrict" }),
+  pickup_warehouse_id: integer("pickup_warehouse_id").references(() => warehouses.id, { onDelete: "restrict" }),
+  order_ids: jsonb("order_ids").$type<number[]>(),
+  order_versions: jsonb("order_versions").$type<Record<string, number>>(),
+  is_route_optimized: boolean("is_route_optimized").notNull().default(false),
   booked_by: integer().notNull().references(() => users.id),
   order_version: integer().notNull(),
   environment: text().notNull(),
@@ -93,3 +123,5 @@ export const lalamove_provider_ids = pgTable("lalamove_provider_ids", {
 
 export type DeliveryOrderInsert = typeof delivery_orders.$inferInsert;
 export type DeliveryOrderSelect = typeof delivery_orders.$inferSelect;
+export type DeliveryOrderStopInsert = typeof delivery_order_stops.$inferInsert;
+export type DeliveryOrderStopSelect = typeof delivery_order_stops.$inferSelect;

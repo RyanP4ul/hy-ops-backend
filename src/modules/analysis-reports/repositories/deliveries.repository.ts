@@ -16,6 +16,7 @@ import {
   users,
   vehicles,
   delivery_orders,
+  delivery_order_stops,
   orders,
 } from "@/db/schema";
 import type {
@@ -33,21 +34,98 @@ import { manilaDay } from "../../../utils/time";
 
 /** External bookings are report projections only; negative IDs cannot collide with fleet runs. */
 export async function findExternalDeliveries(f?: Filters, range?: Range, orderIds?: () => SQLWrapper) {
-  const rows = await db.select({ booking: delivery_orders, warehouseId: orders.warehouse_id }).from(delivery_orders)
-    .innerJoin(orders, eq(orders.id, delivery_orders.order_id)).where(and(
-      eq(delivery_orders.environment, "production"),
-      inArray(delivery_orders.booking_state, ["CONFIRMED", "REVIEW", "UNKNOWN"]),
-      orderIds ? inArray(orders.id, orderIds()) : undefined,
-      range ? and(gte(delivery_orders.created_at, Math.floor(range.start / 1000)), lt(delivery_orders.created_at, Math.floor(range.end / 1000))) : undefined,
-      f?.warehouses.length ? inArray(orders.warehouse_id, f.warehouses.map(Number)) : undefined,
-    )).orderBy(desc(delivery_orders.id));
-  return rows.filter(row => row.booking.lalamove_order_id).map(({ booking: b, warehouseId }) => {
-    const view: DeliveryView = { id: -b.id, date: manilaDay(b.created_at * 1000), departureAt: b.picked_up_at?.getTime() ?? b.created_at * 1000,
-      type: "LALAMOVE", status: b.completed_at ? "completed" : b.picked_up_at ? "in_transit" : ["CANCELED", "REJECTED", "EXPIRED"].includes(b.status) ? "cancelled" : "scheduled",
-      vehicle: "Lalamove (external)", driver: (b.driver_details as { name?: string } | null)?.name ?? "Lalamove courier", warehouseId,
-      cost: b.currency === "PHP" && b.delivery_fee !== null ? Number(b.delivery_fee) : 0, costStatus: b.completed_at ? "approved" : "pending" };
-    return { orderId: b.order_id!, completedAt: b.completed_at?.getTime() ?? null, view };
-  }).filter(row => !f || deliveryMatches(row.view, f));
+  const stopRows = await db
+    .select({
+      booking: delivery_orders,
+      stop: delivery_order_stops,
+      warehouseId: orders.warehouse_id,
+    })
+    .from(delivery_order_stops)
+    .innerJoin(delivery_orders, eq(delivery_orders.id, delivery_order_stops.booking_id))
+    .innerJoin(orders, eq(orders.id, delivery_order_stops.order_id))
+    .where(
+      and(
+        eq(delivery_orders.environment, "production"),
+        inArray(delivery_orders.booking_state, ["CONFIRMED", "REVIEW", "UNKNOWN"]),
+        orderIds ? inArray(orders.id, orderIds()) : undefined,
+        range
+          ? and(
+              gte(delivery_orders.created_at, Math.floor(range.start / 1000)),
+              lt(delivery_orders.created_at, Math.floor(range.end / 1000)),
+            )
+          : undefined,
+        f?.warehouses.length ? inArray(orders.warehouse_id, f.warehouses.map(Number)) : undefined,
+      ),
+    )
+    .orderBy(desc(delivery_orders.id), delivery_order_stops.stop_index);
+
+  const seenBookingIds = new Set(stopRows.map((row) => row.booking.id));
+
+  // Fallback for legacy single-order rows that do not yet have a delivery_order_stops entry.
+  const legacyRows = await db
+    .select({ booking: delivery_orders, warehouseId: orders.warehouse_id })
+    .from(delivery_orders)
+    .innerJoin(orders, eq(orders.id, delivery_orders.order_id))
+    .where(
+      and(
+        eq(delivery_orders.environment, "production"),
+        inArray(delivery_orders.booking_state, ["CONFIRMED", "REVIEW", "UNKNOWN"]),
+        orderIds ? inArray(orders.id, orderIds()) : undefined,
+        range
+          ? and(
+              gte(delivery_orders.created_at, Math.floor(range.start / 1000)),
+              lt(delivery_orders.created_at, Math.floor(range.end / 1000)),
+            )
+          : undefined,
+        f?.warehouses.length ? inArray(orders.warehouse_id, f.warehouses.map(Number)) : undefined,
+      ),
+    )
+    .orderBy(desc(delivery_orders.id));
+
+  const toView = (b: typeof delivery_orders.$inferSelect, warehouseId: number): DeliveryView => ({
+    id: -b.id,
+    date: manilaDay(b.created_at * 1000),
+    departureAt: b.picked_up_at?.getTime() ?? b.created_at * 1000,
+    type: "LALAMOVE",
+    status: b.completed_at
+      ? "completed"
+      : b.picked_up_at
+        ? "in_transit"
+        : ["CANCELED", "REJECTED", "EXPIRED"].includes(b.status)
+          ? "cancelled"
+          : "scheduled",
+    vehicle: "Lalamove (external)",
+    driver: (b.driver_details as { name?: string } | null)?.name ?? "Lalamove courier",
+    warehouseId,
+    cost: b.currency === "PHP" && b.delivery_fee !== null ? Number(b.delivery_fee) : 0,
+    costStatus: b.completed_at ? "approved" : "pending",
+  });
+
+  const projectedStops = stopRows
+    .filter((row) => row.booking.lalamove_order_id)
+    .map(({ booking: b, stop, warehouseId }) => {
+      const view = toView(b, warehouseId);
+      const deliveredAt = stop.delivered_at ?? b.completed_at;
+      return {
+        stopId: -stop.id,
+        orderId: stop.order_id,
+        completedAt: deliveredAt?.getTime() ?? null,
+        view,
+      };
+    });
+
+  const projectedLegacy = legacyRows
+    .filter((row): row is { booking: typeof delivery_orders.$inferSelect & { order_id: number }; warehouseId: number } =>
+      Boolean(row.booking.lalamove_order_id && row.booking.order_id !== null && !seenBookingIds.has(row.booking.id)),
+    )
+    .map(({ booking: b, warehouseId }) => ({
+      stopId: -b.id,
+      orderId: b.order_id,
+      completedAt: b.completed_at?.getTime() ?? null,
+      view: toView(b, warehouseId),
+    }));
+
+  return [...projectedStops, ...projectedLegacy].filter((row) => !f || deliveryMatches(row.view, f));
 }
 
 /**
@@ -243,7 +321,7 @@ export async function findLatestDeliveryByOrder(
   }
   for (const row of await findExternalDeliveries(undefined, undefined, orderIds)) {
     // Query is newest-first. A sales order has one fulfillment summary even after rebooking.
-    if (!out.has(row.orderId) || out.get(row.orderId)!.type !== "LALAMOVE") out.set(row.orderId, row.view);
+    if (out.get(row.orderId)?.type !== "LALAMOVE") out.set(row.orderId, row.view);
   }
   return out;
 }

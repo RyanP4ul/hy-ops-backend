@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, lt, sql } from "drizzle-orm";
 import { db } from "../../db";
-import { delivery_orders, lalamove_events, lalamove_provider_ids } from "../../db/schema/lalamove";
+import { delivery_order_stops, delivery_orders, lalamove_events, lalamove_provider_ids } from "../../db/schema/lalamove";
 import { orders } from "../../db/schema/order";
 import { lalamoveConfig } from "../../plugins/lalamove";
 import { LalamoveService } from "./service";
@@ -29,12 +29,15 @@ export async function processLalamoveEvents() {
       if (data.prevOrderId && data.prevOrderId !== providerId) {
         await db.transaction(async tx => {
           const [initial] = await tx.select().from(delivery_orders).where(eq(delivery_orders.id, alias.booking_id));
-          if (!initial.order_id) throw new Error("Legacy unlinked booking.");
-          await tx.select().from(orders).where(eq(orders.id, initial.order_id)).for("update");
+          if (!initial?.order_id) throw new Error("Legacy unlinked booking.");
+          const linkedStops = await tx.select({ order_id: delivery_order_stops.order_id }).from(delivery_order_stops).where(eq(delivery_order_stops.booking_id, initial.id));
+          const orderIds = Array.from(new Set(linkedStops.length ? linkedStops.map(s => s.order_id) : [initial.order_id])).sort((a, b) => a - b);
+          await tx.select().from(orders).where(inArray(orders.id, orderIds)).orderBy(asc(orders.id)).for("update");
           const [booking] = await tx.select().from(delivery_orders).where(eq(delivery_orders.id, initial.id)).for("update");
           if (booking.lalamove_order_id === data.prevOrderId) {
             await tx.insert(lalamove_provider_ids).values({ identity: `${scope}${providerId}`, booking_id: booking.id }).onConflictDoNothing();
             await tx.update(delivery_orders).set({ lalamove_order_id: providerId, active: true, booking_state: "CONFIRMED", last_synced_at: null }).where(eq(delivery_orders.id, booking.id));
+            await tx.update(delivery_order_stops).set({ active: true, updated_at: new Date() }).where(eq(delivery_order_stops.booking_id, booking.id));
           }
         });
       }

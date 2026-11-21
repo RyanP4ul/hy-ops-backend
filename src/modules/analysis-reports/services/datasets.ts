@@ -103,7 +103,7 @@ export async function stopsFor(
   });
   return [...fleetStops, ...external.flatMap(row => {
     const order = orderById.get(row.orderId);
-    return order ? [{ id: row.view.id, status: row.completedAt ? "delivered" as const : "pending" as const, deliveredAt: row.completedAt, delivery: row.view, order }] : [];
+    return order ? [{ id: row.stopId, status: row.completedAt ? "delivered" as const : "pending" as const, deliveredAt: row.completedAt, delivery: row.view, order }] : [];
   })];
 }
 
