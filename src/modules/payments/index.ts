@@ -2,6 +2,7 @@ import { Elysia, t } from "elysia";
 import { PaymentService } from "./service";
 import { AuthUser } from "../auth/schema";
 import { paymentCreate } from "./model";
+import { parsePaymentListFilters } from "./filters";
 
 export const paymentRoutes = new Elysia({ prefix: "/payments" })
   .decorate("user", AuthUser)
@@ -17,9 +18,10 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
     const limit = query.limit ? Number(query.limit) : 10;
     const search = query.search?.trim() ?? "";
     const sortBy = query.sort_by ?? "id:desc";
+    const filters = parsePaymentListFilters(query);
     const result = query.grouped === "true"
-      ? await PaymentService.getGroupedPayments(page, limit, search, sortBy)
-      : await PaymentService.getPayments(page, limit, search, sortBy);
+      ? await PaymentService.getGroupedPayments(page, limit, search, sortBy, filters)
+      : await PaymentService.getPayments(page, limit, search, sortBy, filters);
     set.headers["X-Total-Count"] = result.total;
     return result.rows;
   }, { detail: { summary: 'List root', description: 'GET endpoint for root in the payments module.', tags: ['Payments'] } })

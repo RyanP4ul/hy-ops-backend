@@ -28,6 +28,7 @@ import { sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { PaymentUpdate } from "./model";
 import { minorUnitsToMoney, moneyToMinorUnits } from "../../utils/money";
+import { buildPaymentFilterConditions, type PaymentListFilters } from "./filters";
 
 type PaymentReader = Pick<typeof db, "select">;
 const grossReceived = sql<string>`${payments.amount} + ${payments.refunded_amount}`;
@@ -74,9 +75,13 @@ export abstract class PaymentService {
     limit = 10,
     search = "",
     sortBy = "id:desc",
+    filters: PaymentListFilters = {},
   ) {
     const [sortField, sortOrder] = sortBy.split(":");
-    const searchQuery = this.paymentSearch(search);
+    const whereClause = and(
+      this.paymentSearch(search),
+      buildPaymentFilterConditions(filters),
+    );
     const [totalResult] = await db
       .select({ count: count() })
       .from(payments)
@@ -85,10 +90,10 @@ export abstract class PaymentService {
       .leftJoin(customers, eq(payments.customer_id, customers.id))
       .leftJoin(users, eq(customers.user_id, users.id))
       .leftJoin(orders, eq(payments.order_id, orders.id))
-      .where(searchQuery);
+      .where(whereClause);
 
     const rows = await this.paymentRows(db)
-      .where(searchQuery)
+      .where(whereClause)
       .orderBy(this.sortByField(sortField, sortOrder))
       .limit(limit)
       .offset(Math.max(page * limit, 0));
@@ -96,12 +101,22 @@ export abstract class PaymentService {
     return { rows: this.withVerifiedStatuses(rows), total: Number(totalResult?.count ?? 0) };
   }
 
-  static async getGroupedPayments(page = 0, limit = 10, search = "", sortBy = "id:desc") {
+  static async getGroupedPayments(
+    page = 0,
+    limit = 10,
+    search = "",
+    sortBy = "id:desc",
+    filters: PaymentListFilters = {},
+  ) {
     page = Number.isSafeInteger(page) && page >= 0 ? page : 0;
     limit = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 100) : 10;
     const [sortField, sortOrder] = sortBy.split(":");
     const direction = sortOrder === "asc" ? asc : desc;
     const entryKey = sql`coalesce(${payment_groups.id}::text, 'payment-' || ${payments.id}::text)`;
+    const whereClause = and(
+      this.paymentSearch(search),
+      buildPaymentFilterConditions(filters),
+    );
 
     return db.transaction(async (tx) => {
       const entries = tx.select({
@@ -120,7 +135,7 @@ export abstract class PaymentService {
         .leftJoin(customers, eq(payments.customer_id, customers.id))
         .leftJoin(users, eq(customers.user_id, users.id))
         .leftJoin(orders, eq(payments.order_id, orders.id))
-        .where(this.paymentSearch(search))
+        .where(whereClause)
         .groupBy(entryKey, payment_groups.id)
         .as("payment_entries");
 

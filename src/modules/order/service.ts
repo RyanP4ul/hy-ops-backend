@@ -402,7 +402,7 @@ export abstract class OrderService {
 
     const statuses = ["PENDING", "PROCESSING", "SCHEDULING", "SCHEDULED", "IN_TRANSIT", "COMPLETED", "CANCELLED"] as const;
     const validStatus = statuses.find((value) => value === status);
-    const latestDeliveryType = sql<string>`coalesce(${orders.delivery_method}, (select ${deliveries.delivery_type}::text from ${deliveries_stops} inner join ${deliveries} on ${deliveries.id} = ${deliveries_stops.delivery_id} where ${deliveries_stops.order_id} = ${orders.id} order by ${deliveries.id} desc limit 1))`;
+    const latestDeliveryType = sql<string | null>`coalesce(${orders.delivery_method}, (select ${deliveries.delivery_type}::text from ${deliveries_stops} inner join ${deliveries} on ${deliveries.id} = ${deliveries_stops.delivery_id} where ${deliveries_stops.order_id} = ${orders.id} order by ${deliveries.id} desc limit 1))`;
     const whereQuery = and(
       or(
         ilike(users.name, `%${search}%`),
@@ -525,7 +525,7 @@ export abstract class OrderService {
 
     const statuses = ["PENDING", "PROCESSING", "SCHEDULING", "SCHEDULED", "IN_TRANSIT", "COMPLETED", "CANCELLED"] as const;
     const validStatus = statuses.find((value) => value === status);
-    const latestDeliveryType = sql<string>`coalesce(${orders.delivery_method}, (select ${deliveries.delivery_type}::text from ${deliveries_stops} inner join ${deliveries} on ${deliveries.id} = ${deliveries_stops.delivery_id} where ${deliveries_stops.order_id} = ${orders.id} order by ${deliveries.id} desc limit 1))`;
+    const latestDeliveryType = sql<string | null>`coalesce(${orders.delivery_method}, (select ${deliveries.delivery_type}::text from ${deliveries_stops} inner join ${deliveries} on ${deliveries.id} = ${deliveries_stops.delivery_id} where ${deliveries_stops.order_id} = ${orders.id} order by ${deliveries.id} desc limit 1))`;
     const entryKey = sql<string>`coalesce(${orders.order_group_id}::text, 'order-' || ${orders.id}::text)`;
     const trimmedSearch = search.trim();
     const match = `%${trimmedSearch}%`;
@@ -717,7 +717,7 @@ export abstract class OrderService {
 
       const warehouseNames = [...new Set(members.map((m) => m.warehouse_name).filter((w): w is string => Boolean(w)))];
       const destinations = [...new Set(members.map((m) => m.shipping_address?.trim()).filter((a): a is string => Boolean(a)))];
-      const deliveryTypes = [...new Set(members.map((m) => m.delivery_type).filter((d): d is string => Boolean(d)))];
+      const deliveryTypes = [...new Set(summaryMembers.map((m) => m.delivery_type).filter((d): d is string => Boolean(d)))];
 
       const hasUnverified = summaryMembers.some((m) => m.total === null);
       const groupTotal = hasUnverified
@@ -752,7 +752,9 @@ export abstract class OrderService {
         delivery_type:
           deliveryTypes.length === 1 && deliveryTypes[0]
             ? deliveryTypes[0]
-            : "MULTIPLE",
+            : deliveryTypes.length > 1
+              ? "MULTIPLE"
+              : null,
         customer_id: first.customer_id,
         customer_name: first.customer_name,
         email: first.email,
