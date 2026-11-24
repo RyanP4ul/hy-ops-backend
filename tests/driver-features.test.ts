@@ -66,9 +66,15 @@ describe.skipIf(!url)("driver history and private proof integration", () => {
     const today = require("../src/utils/time").todayInManila();
     await sql`update deliveries set scheduled_date='2000-01-01',departure_time='00:00' where id=${created.id}`;
     expect((await start()).status).toBe(409);
-    await sql`update deliveries set scheduled_date=${today},departure_time='23:59:59' where id=${created.id}`;
+    const twoHoursLater = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    const laterDay = require("../src/utils/time").manilaDay(twoHoursLater);
+    const laterTime = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Manila", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(twoHoursLater);
+    await sql`update deliveries set scheduled_date=${laterDay},departure_time=${laterTime} where id=${created.id}`;
     expect((await start()).status).toBe(409);
-    await sql`update deliveries set scheduled_date=${today},departure_time='00:00' where id=${created.id}`;
+    const thirtyMinLater = new Date(Date.now() + 30 * 60 * 1000);
+    const flexDay = require("../src/utils/time").manilaDay(thirtyMinLater);
+    const flexTime = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Manila", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(thirtyMinLater);
+    await sql`update deliveries set scheduled_date=${flexDay},departure_time=${flexTime} where id=${created.id}`;
     expect((await start(cookie, 99)).status).toBe(409);
     expect((await start()).status).toBe(200);
     expect((await sql`select status from deliveries where id=${created.id}`)[0].status).toBe("in_transit");

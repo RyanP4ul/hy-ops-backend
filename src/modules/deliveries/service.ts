@@ -47,32 +47,95 @@ import { stock_movements } from "../../db/schema/stock-movement";
 import { order_items } from "@/db/schema/order";
 import { warehouses } from "@/db/schema/warehouses";
 import {
+  canDriverStartTripAt,
+  DEPARTURE_GRACE_MINUTES,
+  DRIVER_START_EARLY_WINDOW_MINUTES,
   isScheduledTripOverdue,
   nowEpochSeconds,
+  RETURN_GRACE_MINUTES,
   toManilaIso,
   todayInManila,
 } from "../../utils/time";
 
 const DEFAULT_SCHEDULE_WINDOW_MINUTES = 120;
-const SCHEDULE_TURNAROUND_BUFFER_MINUTES = 30;
+export const SCHEDULE_TURNAROUND_BUFFER_MINUTES = RETURN_GRACE_MINUTES;
 
-function parseTimeToMinutes(value: string): number {
+export function parseTimeToMinutes(value: string): number {
   const [hoursStr = "0", minutesStr = "0"] = value.split(":");
   const hours = Number(hoursStr);
   const minutes = Number(minutesStr);
   return (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0);
 }
 
-function scheduleWindowMinutes(estimatedDurationMinutes?: number | null): number {
+export function scheduleWindowMinutes(estimatedDurationMinutes?: number | null): number {
   if (
     estimatedDurationMinutes !== undefined &&
     estimatedDurationMinutes !== null &&
     Number.isFinite(estimatedDurationMinutes) &&
     estimatedDurationMinutes > 0
   ) {
-    return Math.min(1440, Math.max(30, Math.round(estimatedDurationMinutes) + SCHEDULE_TURNAROUND_BUFFER_MINUTES));
+    return Math.min(1440, Math.max(60, Math.round(estimatedDurationMinutes) + SCHEDULE_TURNAROUND_BUFFER_MINUTES));
   }
   return DEFAULT_SCHEDULE_WINDOW_MINUTES;
+}
+
+async function resolveDailyCapacityLimit(
+  tx: StockTransaction,
+  warehouseId: number,
+): Promise<number> {
+  const [wh] = await tx
+    .select({ daily_order_limit: warehouses.daily_order_limit })
+    .from(warehouses)
+    .where(eq(warehouses.id, warehouseId));
+  if (wh?.daily_order_limit && wh.daily_order_limit > 0) {
+    return wh.daily_order_limit;
+  }
+  const [globalLimit] = await tx
+    .select({ value: settings.value })
+    .from(settings)
+    .where(eq(settings.name, "order_limit_per_day"));
+  const parsed = Number(globalLimit?.value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 5;
+}
+
+async function assertDailyCapacityAvailable(
+  tx: StockTransaction,
+  input: {
+    warehouseId: number;
+    scheduledDate: string;
+    additionalStops: number;
+    excludeDeliveryId?: number;
+  },
+): Promise<{ usedAfter: number; limit: number }> {
+  const limit = await resolveDailyCapacityLimit(tx, input.warehouseId);
+  const [existing] = await tx
+    .select({ stopCount: count() })
+    .from(deliveries_stops)
+    .innerJoin(deliveries, eq(deliveries_stops.delivery_id, deliveries.id))
+    .innerJoin(orders, eq(deliveries_stops.order_id, orders.id))
+    .where(
+      and(
+        eq(deliveries.scheduled_date, input.scheduledDate),
+        sql`${deliveries.status} <> 'cancelled'`,
+        eq(orders.warehouse_id, input.warehouseId),
+        input.excludeDeliveryId !== undefined
+          ? ne(deliveries.id, input.excludeDeliveryId)
+          : undefined,
+      ),
+    );
+  const usedBefore = Number(existing?.stopCount ?? 0);
+  const usedAfter = usedBefore + input.additionalStops;
+  if (usedAfter > limit) {
+    const remaining = Math.max(0, limit - usedBefore);
+    throw new WorkflowError(
+      remaining === 0
+        ? `Daily delivery capacity is full (${usedBefore}/${limit} stops) for ${input.scheduledDate}. Choose another date or book via Lalamove.`
+        : `Only ${remaining} delivery stop ${remaining === 1 ? "slot remains" : "slots remain"} on ${input.scheduledDate} (${usedBefore}/${limit} used).`,
+      409,
+      "DAILY_CAPACITY_FULL",
+    );
+  }
+  return { usedAfter, limit };
 }
 
 async function assertNoScheduleConflict(
@@ -438,7 +501,7 @@ export abstract class DeliveryService {
       overdue
         ? and(
             eq(deliveries.status, "scheduled"),
-            sql`(${deliveries.scheduled_date} + ${deliveries.departure_time}) AT TIME ZONE 'Asia/Manila' < now()`,
+            sql`((${deliveries.scheduled_date} + ${deliveries.departure_time}) AT TIME ZONE 'Asia/Manila') + (${DEPARTURE_GRACE_MINUTES} * interval '1 minute') < now()`,
           )
         : undefined,
     );
@@ -459,6 +522,7 @@ export abstract class DeliveryService {
         delivery_type: deliveries.delivery_type,
         scheduled_date: deliveries.scheduled_date,
         departure_time: deliveries.departure_time,
+        estimated_duration_minutes: deliveries.estimated_duration_minutes,
         status: deliveries.status,
         version: deliveries.version,
       })
@@ -661,15 +725,24 @@ export abstract class DeliveryService {
         const warehouseIds = new Set(
           [...selectedOrders.values()].map((order) => order.warehouse_id),
         );
+        const driverMatchesWarehouse =
+          warehouseIds.has(driverProfile.warehouse_id) ||
+          Boolean(driverProfile.allow_multi_warehouse);
         if (
           warehouseIds.size !== 1 ||
           !warehouseIds.has(vehicle.warehouse_id) ||
-          !warehouseIds.has(driverProfile.warehouse_id)
+          !driverMatchesWarehouse
         ) {
           throw new WorkflowError(
-            "Orders, driver and vehicle must belong to the same warehouse.",
+            "Orders and vehicle must belong to the same warehouse, and the driver must belong to it or have multi-warehouse reassignment enabled.",
           );
         }
+
+        const dailyCapacity = await assertDailyCapacityAvailable(tx, {
+          warehouseId: vehicle.warehouse_id,
+          scheduledDate: data.scheduled_date,
+          additionalStops: data.order_ids.length,
+        });
 
         await assertNoScheduleConflict(tx, {
           driverId: data.driver_id,
@@ -696,6 +769,19 @@ export abstract class DeliveryService {
 
         if (!delivery) {
           throw new WorkflowError("Failed to create delivery.");
+        }
+
+        if (
+          data.scheduled_date === todayInManila() &&
+          dailyCapacity.usedAfter >= dailyCapacity.limit
+        ) {
+          await notifyDeliveryStaff(
+            tx,
+            { id: delivery.id, vehicle_id: data.vehicle_id },
+            `Daily capacity reached (${data.scheduled_date})`,
+            `All ${dailyCapacity.limit} delivery stop slots for today (${data.scheduled_date}) are now booked.`,
+            "DAILY_CAPACITY_FULL",
+          );
         }
 
         const is_deliveries_expenses_created = await tx
@@ -857,6 +943,22 @@ export abstract class DeliveryService {
           if (!nextDate || !nextTime) {
             throw new WorkflowError("Choose a future departure date and time in Asia/Manila.", 400);
           }
+          const [rescheduleVehicle] = await tx
+            .select({ warehouse_id: vehicles.warehouse_id })
+            .from(vehicles)
+            .where(eq(vehicles.id, delivery.vehicle_id));
+          const [rescheduleStopCount] = await tx
+            .select({ stopCount: count() })
+            .from(deliveries_stops)
+            .where(eq(deliveries_stops.delivery_id, data.delivery_id));
+          const rescheduleCapacity = rescheduleVehicle
+            ? await assertDailyCapacityAvailable(tx, {
+                warehouseId: rescheduleVehicle.warehouse_id,
+                scheduledDate: nextDate,
+                additionalStops: Number(rescheduleStopCount?.stopCount ?? 1),
+                excludeDeliveryId: data.delivery_id,
+              })
+            : null;
           await assertNoScheduleConflict(tx, {
             driverId: delivery.driver_id,
             vehicleId: delivery.vehicle_id,
@@ -882,6 +984,20 @@ export abstract class DeliveryService {
                 eq(deliveries.version, data.delivery_version),
               ),
             );
+
+          if (
+            rescheduleCapacity &&
+            nextDate === todayInManila() &&
+            rescheduleCapacity.usedAfter >= rescheduleCapacity.limit
+          ) {
+            await notifyDeliveryStaff(
+              tx,
+              { id: data.delivery_id, vehicle_id: delivery.vehicle_id },
+              `Daily capacity reached (${nextDate})`,
+              `All ${rescheduleCapacity.limit} delivery stop slots for today (${nextDate}) are now booked.`,
+              "DAILY_CAPACITY_FULL",
+            );
+          }
 
           await queueDeliveryEventNotifications(tx, data.delivery_id, {
             eventKey: `event:${event.id}`, eventType: "rescheduled", reason: data.reason.trim(),
@@ -975,11 +1091,12 @@ export abstract class DeliveryService {
         if (
           !assignedOrders.length ||
           assignedOrders.some((o) => o.warehouseId !== vehicle.warehouse_id) ||
-          driverProfile.warehouse_id !== vehicle.warehouse_id ||
+          (driverProfile.warehouse_id !== vehicle.warehouse_id &&
+            !driverProfile.allow_multi_warehouse) ||
           (warehouseId !== undefined && vehicle.warehouse_id !== warehouseId)
         )
           throw new WorkflowError(
-            "Orders, driver and vehicle must remain in the same authorized warehouse.",
+            "Orders and vehicle must remain in the same authorized warehouse, and the driver must belong to it or have multi-warehouse reassignment enabled.",
             403,
           );
         await assertVehiclePayloadCapacity(
@@ -1065,13 +1182,16 @@ export abstract class DeliveryService {
             "Assignment changed. Refresh the trip before starting.",
           );
         if (
-          delivery.scheduled_date !== todayInManila(now) ||
-          Date.parse(
-            toManilaIso(delivery.scheduled_date, delivery.departure_time),
-          ) > now.getTime()
+          !canDriverStartTripAt(
+            delivery.scheduled_date,
+            delivery.departure_time,
+            now.getTime(),
+            DRIVER_START_EARLY_WINDOW_MINUTES,
+            DEPARTURE_GRACE_MINUTES,
+          )
         ) {
           throw new WorkflowError(
-            "Start this trip on its scheduled Manila date, at or after departure time.",
+            `Trips can be started starting ${DRIVER_START_EARLY_WINDOW_MINUTES} minutes before the scheduled departure time on the scheduled Manila date.`,
           );
         }
       }

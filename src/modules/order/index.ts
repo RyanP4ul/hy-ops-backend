@@ -15,6 +15,29 @@ export const orderRoutes = new Elysia({ prefix: "/orders" })
       detail: { summary: 'List customer saved shipping addresses', description: 'GET endpoint for customer saved shipping addresses in the orders module.', tags: ['Orders'] },
     params: t.Object({ customerId: t.Numeric({ minimum: 1 }) }),
   })
+  .get("/customers/:customerId/recent", async ({ params, query, user }) => {
+    const warehouseId = await staffWarehouse(user);
+    const limit = query.limit ? Math.min(Math.max(Number(query.limit), 1), 20) : 5;
+    return OrderService.getCustomerRecentOrders(params.customerId, warehouseId, limit);
+  }, {
+    detail: {
+      summary: "List recent orders for a returning customer (Suki quick reorder)",
+      tags: ["Orders"],
+    },
+    params: t.Object({ customerId: t.Numeric({ minimum: 1 }) }),
+    query: t.Object({ limit: t.Optional(t.Numeric({ minimum: 1, maximum: 20 })) }),
+  })
+  .get("/:id/reorder-template", async ({ params, user }) => {
+    const warehouseId = await staffWarehouse(user);
+    await assertOrderScope(params.id, warehouseId);
+    return OrderService.getReorderTemplate(params.id, warehouseId);
+  }, {
+    detail: {
+      summary: "Build a live-validated reorder template from a past order",
+      tags: ["Orders"],
+    },
+    params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+  })
   .post("/customers/:customerId/addresses", ({ params, body }) =>
     OrderService.saveShippingAddress(params.customerId, body), {
       detail: { summary: 'Create customers by customerId addresses', description: 'POST endpoint for customers by customerId addresses in the orders module.', tags: ['Orders'] },

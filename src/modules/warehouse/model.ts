@@ -1,12 +1,12 @@
 import Elysia, { Static, t } from "elysia";
 
 export const warehouse_schema = t.Object({
-  name: t.String({ minLength: 1, maxLength: 100 }),
+  name: t.String({ minLength: 1, maxLength: 100, pattern: "\\S" }),
   phone_number: t.Optional(t.Union([t.Null(), t.String({ maxLength: 20, pattern: "^$|^\\+?[0-9 ()-]{7,20}$" })])),
-  street_address: t.String({ minLength: 1, maxLength: 255 }),
-  city: t.String({ minLength: 1, maxLength: 100 }),
-  state: t.String({ minLength: 1, maxLength: 100 }),
-  zip_code: t.String({ minLength: 1, maxLength: 30 }),
+  street_address: t.String({ minLength: 1, maxLength: 255, pattern: "\\S" }),
+  city: t.String({ minLength: 1, maxLength: 100, pattern: "\\S" }),
+  state: t.String({ minLength: 1, maxLength: 100, pattern: "\\S" }),
+  zip_code: t.String({ minLength: 1, maxLength: 30, pattern: "\\S" }),
   clear_coordinates: t.Optional(t.Boolean()),
   latitude: t.Optional(t.Number({ minimum: -90, maximum: 90 })),
   longitude: t.Optional(t.Number({ minimum: -180, maximum: 180 })),

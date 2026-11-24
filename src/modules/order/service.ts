@@ -457,6 +457,12 @@ export abstract class OrderService {
           product_name: products.name,
           product_variant_name: product_variants.name,
           product_variant_sku: product_variants.sku,
+          unit: product_variants.unit,
+          weight_kg: product_variants.weight_kg,
+          width_value: product_variants.width_value,
+          width_unit: product_variants.width_unit,
+          length_value: product_variants.length_value,
+          length_unit: product_variants.length_unit,
           quantity: order_items.quantity,
           price: order_items.unit_price_snapshot,
         })
@@ -626,6 +632,12 @@ export abstract class OrderService {
             product_name: products.name,
             product_variant_name: product_variants.name,
             product_variant_sku: product_variants.sku,
+            unit: product_variants.unit,
+            weight_kg: product_variants.weight_kg,
+            width_value: product_variants.width_value,
+            width_unit: product_variants.width_unit,
+            length_value: product_variants.length_value,
+            length_unit: product_variants.length_unit,
             quantity: order_items.quantity,
             price: order_items.unit_price_snapshot,
           })
@@ -836,6 +848,12 @@ export abstract class OrderService {
           product_name: products.name,
           product_variant_name: product_variants.name,
           product_variant_sku: product_variants.sku,
+          unit: product_variants.unit,
+          weight_kg: product_variants.weight_kg,
+          width_value: product_variants.width_value,
+          width_unit: product_variants.width_unit,
+          length_value: product_variants.length_value,
+          length_unit: product_variants.length_unit,
           description: product_variants.description,
           quantity: order_items.quantity,
           price: order_items.unit_price_snapshot,
@@ -1356,6 +1374,10 @@ export abstract class OrderService {
           ? "PAID"
           : "PARTIALLY_PAID";
 
+    const isFullyPaid =
+      data.payment_arrangement === "FULLY_PAID" || paymentStatus === "PAID";
+    const paidTimestamp = receivedAt ?? new Date();
+
     const payment = await PaymentService.createPayment(tx, {
       payment_number: `PAY-${String(new_order.id).padStart(6, "0")}`,
       order_id: new_order.id,
@@ -1364,7 +1386,7 @@ export abstract class OrderService {
       payment_type: data.payment_method === "CASH" ? null : data.payment_type?.trim() || null,
       amount: minorUnitsToMoney(amountPaidMinor),
       payment_status: paymentStatus,
-      received_at: amountPaidMinor > 0n ? receivedAt ?? new Date() : null,
+      received_at: amountPaidMinor > 0n ? paidTimestamp : null,
     });
 
     const invoice = await InvoiceService.createInvoice(
@@ -1379,10 +1401,25 @@ export abstract class OrderService {
       throw new WorkflowError("Failed to create invoice");
     }
 
+    if (isFullyPaid) {
+      await tx
+        .update(orders)
+        .set({ status: "SCHEDULING", updated_at: paidTimestamp })
+        .where(eq(orders.id, new_order.id));
+
+      await tx
+        .update(invoices)
+        .set({ status: "ISSUED", issue_date: paidTimestamp })
+        .where(eq(invoices.order_id, new_order.id));
+    }
+
     return {
       id: new_order.id,
       payment_id: payment.id,
-      message: `Order ${order_number} has been created successfully.`,
+      status: isFullyPaid ? "SCHEDULING" : "PENDING",
+      message: isFullyPaid
+        ? `Order ${order_number} is fully paid and routed directly to delivery scheduling.`
+        : `Order ${order_number} has been created successfully.`,
     };
   }
 
@@ -2072,11 +2109,11 @@ export abstract class OrderService {
         throw new WorkflowError("Completed walk-in orders cannot be cancelled. Use returns or payment refunds instead.");
       }
 
-      const unscheduledWalkInDelivery = order.sales_channel === "WALK_IN" && order.delivery_method === "INTERNAL" && order.status === "SCHEDULING";
-      if (!["PENDING", "PROCESSING"].includes(order.status) && !unscheduledWalkInDelivery) {
-        throw new WorkflowError("Only pending, processing, or unscheduled walk-in delivery orders can be cancelled");
+      const unscheduledSchedulingOrder = order.status === "SCHEDULING";
+      if (!["PENDING", "PROCESSING"].includes(order.status) && !unscheduledSchedulingOrder) {
+        throw new WorkflowError("Only pending, processing, or unscheduled scheduling orders can be cancelled");
       }
-      if (unscheduledWalkInDelivery) {
+      if (unscheduledSchedulingOrder) {
         const [assigned] = await tx.select({ id: deliveries_stops.id }).from(deliveries_stops)
           .innerJoin(deliveries, eq(deliveries.id, deliveries_stops.delivery_id))
           .where(and(eq(deliveries_stops.order_id, orderId), sql`${deliveries.status} <> 'cancelled'`)).limit(1);
@@ -2400,6 +2437,25 @@ export abstract class OrderService {
             })
             .where(eq(payments.order_id, orderId));
         }
+
+        const becameFullyPaid =
+          totalMinor > 0n &&
+          amountPaidMinor >= totalMinor &&
+          (updates.payment_arrangement === "FULLY_PAID" ||
+            order.payment_arrangement === "FULLY_PAID" ||
+            itemsChanged);
+        if (
+          becameFullyPaid &&
+          ["PENDING", "PROCESSING"].includes(order.status) &&
+          order.delivery_method !== "WALK_IN"
+        ) {
+          updates.payment_arrangement = "FULLY_PAID";
+          updates.status = "SCHEDULING";
+          await tx
+            .update(invoices)
+            .set({ status: "ISSUED", issue_date: new Date() })
+            .where(and(eq(invoices.order_id, orderId), eq(invoices.status, "DRAFT")));
+        }
       }
 
       await tx.update(orders).set(updates).where(eq(orders.id, orderId));
@@ -2631,6 +2687,296 @@ export abstract class OrderService {
       updated_at: order.updated_at,
       delivery: latestStop[0] ?? null,
       items,
+    };
+  }
+
+  static async getCustomerRecentOrders(
+    customerId: number,
+    warehouseId?: number,
+    limit = 5,
+  ) {
+    const where = and(
+      eq(orders.customer_id, customerId),
+      sql`${orders.status} <> 'CANCELLED'`,
+      warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId),
+    );
+
+    const [[countRow], recentOrders] = await Promise.all([
+      db.select({ total: count() }).from(orders).where(where),
+      db
+        .select({
+          id: orders.id,
+          order_number: orders.order_number,
+          warehouse_id: orders.warehouse_id,
+          warehouse_name: warehouses.name,
+          status: orders.status,
+          delivery_method: orders.delivery_method,
+          payment_arrangement: orders.payment_arrangement,
+          shipping_address: orders.shipping_address,
+          created_at: orders.created_at,
+        })
+        .from(orders)
+        .leftJoin(warehouses, eq(warehouses.id, orders.warehouse_id))
+        .where(where)
+        .orderBy(desc(orders.created_at), desc(orders.id))
+        .limit(limit),
+    ]);
+
+    const orderIds = recentOrders.map((o) => o.id);
+    const items = orderIds.length
+      ? await db
+          .select({
+            order_id: order_items.order_id,
+            inventory_id: order_items.inventory_id,
+            quantity: order_items.quantity,
+            price: order_items.unit_price_snapshot,
+            product_name: products.name,
+            variant_name: product_variants.name,
+            sku: product_variants.sku,
+            unit: product_variants.unit,
+          })
+          .from(order_items)
+          .leftJoin(inventory, eq(inventory.id, order_items.inventory_id))
+          .leftJoin(products, eq(products.id, inventory.product_id))
+          .leftJoin(
+            product_variants,
+            eq(product_variants.id, inventory.product_variant_id),
+          )
+          .where(inArray(order_items.order_id, orderIds))
+      : [];
+
+    const byOrder = new Map<number, typeof items>();
+    for (const item of items) {
+      const list = byOrder.get(item.order_id) ?? [];
+      list.push(item);
+      byOrder.set(item.order_id, list);
+    }
+
+    const totalOrders = Number(countRow?.total ?? 0);
+    return {
+      customer_id: customerId,
+      total_orders: totalOrders,
+      is_suki: totalOrders >= 1,
+      recent_orders: recentOrders.map((order) => {
+        const orderItems = byOrder.get(order.id) ?? [];
+        const total = orderItems.reduce(
+          (sum, row) => sum + Number(row.price ?? 0) * row.quantity,
+          0,
+        );
+        return {
+          ...order,
+          item_count: orderItems.length,
+          total_quantity: orderItems.reduce((sum, row) => sum + row.quantity, 0),
+          total,
+          items_preview: orderItems.slice(0, 3).map((row) => ({
+            product_name: row.product_name,
+            variant_name: row.variant_name,
+            sku: row.sku,
+            unit: row.unit,
+            quantity: row.quantity,
+          })),
+        };
+      }),
+    };
+  }
+
+  static async getReorderTemplate(orderId: number, warehouseId?: number) {
+    const [orderRow] = await db
+      .select({
+        id: orders.id,
+        order_number: orders.order_number,
+        warehouse_id: orders.warehouse_id,
+        warehouse_name: warehouses.name,
+        customer_id: orders.customer_id,
+        customer_name: users.name,
+        customer_company: customers.company_name,
+        customer_phone: customers.phone_number,
+        delivery_method: orders.delivery_method,
+        payment_arrangement: orders.payment_arrangement,
+        notes: orders.notes,
+        shipping_recipient: orders.shipping_recipient,
+        shipping_phone: orders.shipping_phone,
+        shipping_address: orders.shipping_address,
+        shipping_latitude: orders.shipping_latitude,
+        shipping_longitude: orders.shipping_longitude,
+        shipping_address_source_id: orders.shipping_address_source_id,
+      })
+      .from(orders)
+      .innerJoin(warehouses, eq(warehouses.id, orders.warehouse_id))
+      .innerJoin(customers, eq(customers.id, orders.customer_id))
+      .innerJoin(users, eq(users.id, customers.user_id))
+      .where(
+        and(
+          eq(orders.id, orderId),
+          warehouseId === undefined ? undefined : eq(orders.warehouse_id, warehouseId),
+        ),
+      );
+
+    if (!orderRow) {
+      throw new WorkflowError("Order not found.", 404);
+    }
+
+    const [savedAddresses, pastPayment, pastItems] = await Promise.all([
+      db
+        .select({
+          id: customer_addresses.id,
+          customer_id: customer_addresses.customer_id,
+          address_line: customer_addresses.address_line,
+          barangay: customer_addresses.barangay,
+          city_municipality: customer_addresses.city_municipality,
+          province: customer_addresses.province,
+          postal_code: customer_addresses.postal_code,
+          latitude: customer_addresses.latitude,
+          longitude: customer_addresses.longitude,
+        })
+        .from(customer_addresses)
+        .where(eq(customer_addresses.customer_id, orderRow.customer_id))
+        .orderBy(asc(customer_addresses.id)),
+      db
+        .select({
+          payment_method: payments.payment_method,
+          payment_type: payments.payment_type,
+        })
+        .from(payments)
+        .where(eq(payments.order_id, orderRow.id))
+        .limit(1),
+      db
+        .select({
+          inventory_id: order_items.inventory_id,
+          requested_quantity: order_items.quantity,
+          previous_price: order_items.unit_price_snapshot,
+          current_price: product_variants.price,
+          product_name: products.name,
+          product_variant_name: product_variants.name,
+          product_variant_sku: product_variants.sku,
+          description: product_variants.description,
+          unit: product_variants.unit,
+          weight_kg: product_variants.weight_kg,
+          width_value: product_variants.width_value,
+          width_unit: product_variants.width_unit,
+          length_value: product_variants.length_value,
+          length_unit: product_variants.length_unit,
+          quantity_on_hand: inventory.quantity,
+          reserved: inventory.reserved,
+          inventory_active: inventory.is_active,
+          inventory_archived: inventory.is_archived,
+          product_active: products.is_active,
+          product_archived: products.is_archived,
+        })
+        .from(order_items)
+        .leftJoin(inventory, eq(inventory.id, order_items.inventory_id))
+        .leftJoin(products, eq(products.id, inventory.product_id))
+        .leftJoin(
+          product_variants,
+          eq(product_variants.id, inventory.product_variant_id),
+        )
+        .where(eq(order_items.order_id, orderRow.id))
+        .orderBy(asc(order_items.id)),
+    ]);
+
+    const warnings: string[] = [];
+    const items: {
+      inventory_id: number;
+      quantity: number;
+      available_stock: number;
+      price: number;
+      previous_price: number | null;
+      product_name: string | null;
+      product_variant_name: string | null;
+      product_variant_sku: string | null;
+      description: string | null;
+      unit: string | null;
+      weight_kg: string | null;
+      width_value: string | null;
+      width_unit: string | null;
+      length_value: string | null;
+      length_unit: string | null;
+    }[] = [];
+
+    for (const row of pastItems) {
+      const label = [row.product_name, row.product_variant_name, row.product_variant_sku]
+        .filter(Boolean)
+        .join(" ");
+      const operational =
+        row.inventory_active === true &&
+        row.inventory_archived === false &&
+        row.product_active === true &&
+        row.product_archived === false;
+      const availableStock = Math.max(
+        0,
+        Number(row.quantity_on_hand ?? 0) - Number(row.reserved ?? 0),
+      );
+      if (!operational || availableStock <= 0) {
+        warnings.push(
+          `${label || `Item #${row.inventory_id}`} is currently unavailable or out of stock and was skipped.`,
+        );
+        continue;
+      }
+      const nextQty = Math.min(row.requested_quantity, availableStock);
+      if (nextQty < row.requested_quantity) {
+        warnings.push(
+          `${label || `Item #${row.inventory_id}`} quantity reduced from ${row.requested_quantity} to ${nextQty} (available stock).`,
+        );
+      }
+      const livePrice = Number(row.current_price ?? row.previous_price ?? 0);
+      const prevPrice =
+        row.previous_price !== null ? Number(row.previous_price) : null;
+      if (prevPrice !== null && Math.abs(livePrice - prevPrice) >= 0.01) {
+        warnings.push(
+          `${label || `Item #${row.inventory_id}`} price updated from ₱${prevPrice.toFixed(2)} to ₱${livePrice.toFixed(2)}.`,
+        );
+      }
+      items.push({
+        inventory_id: row.inventory_id,
+        quantity: nextQty,
+        available_stock: availableStock,
+        price: livePrice,
+        previous_price: prevPrice,
+        product_name: row.product_name,
+        product_variant_name: row.product_variant_name,
+        product_variant_sku: row.product_variant_sku,
+        description: row.description,
+        unit: row.unit,
+        weight_kg: row.weight_kg,
+        width_value: row.width_value,
+        width_unit: row.width_unit,
+        length_value: row.length_value,
+        length_unit: row.length_unit,
+      });
+    }
+
+    const matchedAddress =
+      savedAddresses.find((a) => a.id === orderRow.shipping_address_source_id) ??
+      savedAddresses[0] ??
+      null;
+
+    const paymentMethod =
+      pastPayment[0]?.payment_method === "BANK_TRANSFER"
+        ? "BANK_TRANSFER"
+        : "CASH";
+
+    return {
+      source_order_id: orderRow.id,
+      source_order_number: orderRow.order_number,
+      warehouse_id: orderRow.warehouse_id,
+      warehouse_name: orderRow.warehouse_name,
+      customer: {
+        id: orderRow.customer_id,
+        name: orderRow.customer_name,
+        company_name: orderRow.customer_company,
+        phone_number: orderRow.customer_phone,
+        addresses: savedAddresses,
+      },
+      customer_address_id: matchedAddress?.id ?? undefined,
+      delivery_type:
+        orderRow.delivery_method === "LALAMOVE" ? "LALAMOVE" : "INTERNAL",
+      payment_arrangement: orderRow.payment_arrangement,
+      payment_method: paymentMethod,
+      payment_type:
+        paymentMethod === "BANK_TRANSFER" ? pastPayment[0]?.payment_type ?? "" : "",
+      notes: orderRow.notes ?? "",
+      items,
+      warnings,
     };
   }
 

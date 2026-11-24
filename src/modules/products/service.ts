@@ -8,6 +8,45 @@ import {
   ProductVariantInsert,
 } from "@/db/schema/products";
 import { and, desc, eq, ilike, or, sql, notInArray } from "drizzle-orm";
+import { generateHyphenatedSku, isValidSku, normalizeSku } from "./sku";
+
+type ProductVariantInput = Omit<ProductVariantInsert, "product_id" | "sku"> & {
+  id?: number;
+  sku?: string;
+};
+
+async function resolveVariantSku(
+  tx: any,
+  productName: string,
+  variant: ProductVariantInput,
+  batchUsedSkus: Set<string>,
+  excludeVariantId?: number,
+): Promise<string> {
+  const rawSku = variant.sku?.trim() ?? "";
+  if (rawSku && rawSku.toUpperCase() !== "HY-") {
+    const normalized = normalizeSku(rawSku);
+    if (!isValidSku(normalized)) {
+      throw new WorkflowError(
+        `SKU "${rawSku}" must use letters, numbers, and hyphens (e.g., HY-LN-32MM).`,
+      );
+    }
+    batchUsedSkus.add(normalized);
+    return normalized;
+  }
+
+  const existingRows: { id: number; sku: string }[] = await tx
+    .select({ id: product_variants.id, sku: product_variants.sku })
+    .from(product_variants);
+  const used = new Set<string>(batchUsedSkus);
+  for (const row of existingRows) {
+    if (excludeVariantId !== undefined && row.id === excludeVariantId) continue;
+    used.add(normalizeSku(row.sku));
+  }
+
+  const generated = generateHyphenatedSku(productName, variant.name, used);
+  batchUsedSkus.add(generated);
+  return generated;
+}
 
 function productConflict(error: unknown): never {
   const detail = error as { code?: string; cause?: { code?: string } };
@@ -108,7 +147,7 @@ export abstract class ProductService {
   static async createProduct(
     data: Required<
       ProductInsert & {
-        variants: Omit<ProductVariantInsert, "product_id">[];
+        variants: ProductVariantInput[];
       }
     >,
   ) {
@@ -126,18 +165,26 @@ export abstract class ProductService {
         throw new WorkflowError("Failed to create product.");
       }
 
-      const variants = data.variants.length ? await tx
-        .insert(product_variants)
-        .values(
-          data.variants.map((variant) => ({
-            ...variant,
-            product_id: product.id,
-          })),
-        )
-        .returning({
-          id: product_variants.id,
-          sku: product_variants.sku,
-        }) : [];
+      const batchUsedSkus = new Set<string>();
+      const preparedVariants: ProductVariantInsert[] = [];
+      for (const variant of data.variants) {
+        const sku = await resolveVariantSku(tx, data.name, variant, batchUsedSkus);
+        preparedVariants.push({
+          ...variant,
+          sku,
+          product_id: product.id,
+        });
+      }
+
+      const variants = preparedVariants.length
+        ? await tx
+            .insert(product_variants)
+            .values(preparedVariants)
+            .returning({
+              id: product_variants.id,
+              sku: product_variants.sku,
+            })
+        : [];
 
       if (!variants) {
         throw new WorkflowError("Failed to create product variants.");
@@ -159,13 +206,22 @@ export abstract class ProductService {
   static async updateProductVariant(
     tx: any,
     product_id: number,
-    variant: Omit<ProductVariantInsert & { id?: number }, "product_id">,
+    productName: string,
+    variant: ProductVariantInput,
+    batchUsedSkus: Set<string>,
   ) {
-    const { id, ...data } = variant;
+    const { id, ...rest } = variant;
+    const sku = await resolveVariantSku(
+      tx,
+      productName,
+      variant,
+      batchUsedSkus,
+      Number(id),
+    );
 
     const variantResult = await tx
       .update(product_variants)
-      .set(data)
+      .set({ ...rest, sku, updated_at: new Date() })
       .where(
         and(
           eq(product_variants.id, Number(variant.id)),
@@ -183,12 +239,16 @@ export abstract class ProductService {
   static async createProductVariant(
     tx: any,
     product_id: number,
-    variant: Omit<ProductVariantInsert & { id?: number }, "product_id">,
+    productName: string,
+    variant: ProductVariantInput,
+    batchUsedSkus: Set<string>,
   ) {
-    const { id, ...data } = variant;
+    const { id, ...rest } = variant;
+    const sku = await resolveVariantSku(tx, productName, variant, batchUsedSkus);
 
     return await tx.insert(product_variants).values({
-      ...data,
+      ...rest,
+      sku,
       product_id: product_id,
       created_at: new Date(),
       updated_at: new Date(),
@@ -198,7 +258,7 @@ export abstract class ProductService {
   static async updateProductById(
     product_id: number,
     data: Required<ProductInsert> & {
-      variants: Omit<ProductVariantInsert & { id?: number }, "product_id">[];
+      variants: ProductVariantInput[];
     },
   ): Promise<boolean> {
     return await db.transaction(async (tx) => {
@@ -230,14 +290,18 @@ export abstract class ProductService {
         if (stock) throw new WorkflowError("A variant used by inventory cannot be removed. Keep it to preserve stock and order history.");
         await tx.delete(product_variants).where(eq(product_variants.id, variant.id));
       }
+      const batchUsedSkus = new Set<string>();
       for (const variant of data.variants) {
-        if (!variant.id) { await this.createProductVariant(tx, product_id, variant); continue; }
+        if (!variant.id) {
+          await this.createProductVariant(tx, product_id, data.name, variant, batchUsedSkus);
+          continue;
+        }
         const [product_variant] = await tx.select({ id: product_variants.id }).from(product_variants).where(and(eq(product_variants.id, Number(variant.id)), eq(product_variants.product_id, product_id)));
 
         if (!product_variant) {
-          await this.createProductVariant(tx, product_id, variant);
+          await this.createProductVariant(tx, product_id, data.name, variant, batchUsedSkus);
         } else {
-          await this.updateProductVariant(tx, product_id, variant);
+          await this.updateProductVariant(tx, product_id, data.name, variant, batchUsedSkus);
         }
       }
 

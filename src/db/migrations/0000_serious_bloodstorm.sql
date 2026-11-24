@@ -5,6 +5,9 @@ CREATE TYPE "public"."deliveries_expenses_status" AS ENUM('pending', 'approved',
 CREATE TYPE "public"."deliveries_status" AS ENUM('scheduled', 'in_transit', 'completed', 'returning', 'cancelled');--> statement-breakpoint
 CREATE TYPE "public"."deliveries_stops_status" AS ENUM('pending', 'delivered', 'failed');--> statement-breakpoint
 CREATE TYPE "public"."delivery_type" AS ENUM('LALAMOVE', 'PICKUP', 'INTERNAL');--> statement-breakpoint
+CREATE TYPE "public"."delivery_incident_category" AS ENUM('DELAY', 'TRAFFIC', 'BREAKDOWN', 'ACCIDENT', 'WEATHER', 'OTHER');--> statement-breakpoint
+CREATE TYPE "public"."delivery_incident_severity" AS ENUM('low', 'medium', 'high', 'critical');--> statement-breakpoint
+CREATE TYPE "public"."delivery_incident_status" AS ENUM('open', 'acknowledged', 'resolved');--> statement-breakpoint
 CREATE TYPE "public"."order_status" AS ENUM('PENDING', 'PROCESSING', 'SCHEDULING', 'SCHEDULED', 'IN_TRANSIT', 'COMPLETED', 'CANCELLED');--> statement-breakpoint
 CREATE TYPE "public"."payment_arrangement" AS ENUM('FULLY_PAID', 'PARTIALLY_PAID', 'PAY_ON_DELIVERY', 'NET_30');--> statement-breakpoint
 CREATE TYPE "public"."payment_method" AS ENUM('CASH', 'BANK_TRANSFER', 'CARD');--> statement-breakpoint
@@ -201,6 +204,26 @@ CREATE TABLE "deliveries_stops" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE "delivery_incidents" (
+	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "delivery_incidents_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
+	"delivery_id" integer NOT NULL,
+	"stop_id" integer,
+	"vehicle_id" integer,
+	"reported_by" integer NOT NULL,
+	"category" "delivery_incident_category" NOT NULL,
+	"severity" "delivery_incident_severity" DEFAULT 'medium' NOT NULL,
+	"status" "delivery_incident_status" DEFAULT 'open' NOT NULL,
+	"description" text NOT NULL,
+	"status_notes" text,
+	"estimated_delay_minutes" integer,
+	"latitude" numeric(9, 6),
+	"longitude" numeric(9, 6),
+	"resolved_by" integer,
+	"resolved_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "delivery_notifications" (
 	"id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "delivery_notifications_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
 	"stop_id" integer,
@@ -395,7 +418,7 @@ CREATE TABLE "notifications" (
 	"message" text NOT NULL,
 	"type" varchar(50) NOT NULL,
 	"is_read" boolean DEFAULT false NOT NULL,
-	"created_at" integer DEFAULT 1795179844 NOT NULL
+	"created_at" integer DEFAULT 1795500871 NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "order_groups" (
@@ -563,7 +586,8 @@ CREATE TABLE "drivers" (
 	"user_id" integer NOT NULL,
 	"warehouse_id" integer NOT NULL,
 	"status" "driver_status" DEFAULT 'available' NOT NULL,
-	"phone_number" varchar NOT NULL
+	"phone_number" varchar NOT NULL,
+	"allow_multi_warehouse" boolean DEFAULT false NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "staffs" (
@@ -791,6 +815,11 @@ ALTER TABLE "deliveries_expenses" ADD CONSTRAINT "deliveries_expenses_settled_by
 ALTER TABLE "deliveries_proof" ADD CONSTRAINT "deliveries_proof_delivery_id_deliveries_id_fk" FOREIGN KEY ("delivery_id") REFERENCES "public"."deliveries"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
 ALTER TABLE "deliveries_stops" ADD CONSTRAINT "deliveries_stops_delivery_id_deliveries_id_fk" FOREIGN KEY ("delivery_id") REFERENCES "public"."deliveries"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
 ALTER TABLE "deliveries_stops" ADD CONSTRAINT "deliveries_stops_order_id_orders_id_fk" FOREIGN KEY ("order_id") REFERENCES "public"."orders"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
+ALTER TABLE "delivery_incidents" ADD CONSTRAINT "delivery_incidents_delivery_id_deliveries_id_fk" FOREIGN KEY ("delivery_id") REFERENCES "public"."deliveries"("id") ON DELETE cascade ON UPDATE cascade;--> statement-breakpoint
+ALTER TABLE "delivery_incidents" ADD CONSTRAINT "delivery_incidents_stop_id_deliveries_stops_id_fk" FOREIGN KEY ("stop_id") REFERENCES "public"."deliveries_stops"("id") ON DELETE set null ON UPDATE cascade;--> statement-breakpoint
+ALTER TABLE "delivery_incidents" ADD CONSTRAINT "delivery_incidents_vehicle_id_vehicles_id_fk" FOREIGN KEY ("vehicle_id") REFERENCES "public"."vehicles"("id") ON DELETE set null ON UPDATE cascade;--> statement-breakpoint
+ALTER TABLE "delivery_incidents" ADD CONSTRAINT "delivery_incidents_reported_by_users_id_fk" FOREIGN KEY ("reported_by") REFERENCES "public"."users"("id") ON DELETE restrict ON UPDATE cascade;--> statement-breakpoint
+ALTER TABLE "delivery_incidents" ADD CONSTRAINT "delivery_incidents_resolved_by_users_id_fk" FOREIGN KEY ("resolved_by") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE cascade;--> statement-breakpoint
 ALTER TABLE "delivery_notifications" ADD CONSTRAINT "delivery_notifications_stop_id_deliveries_stops_id_fk" FOREIGN KEY ("stop_id") REFERENCES "public"."deliveries_stops"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "delivery_notifications" ADD CONSTRAINT "delivery_notifications_booking_id_delivery_orders_id_fk" FOREIGN KEY ("booking_id") REFERENCES "public"."delivery_orders"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "delivery_notifications" ADD CONSTRAINT "delivery_notifications_lalamove_stop_id_delivery_order_stops_id_fk" FOREIGN KEY ("lalamove_stop_id") REFERENCES "public"."delivery_order_stops"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -859,6 +888,9 @@ CREATE INDEX "customer_return_warehouse_status" ON "customer_returns" USING btre
 CREATE INDEX "customer_return_delivery" ON "customer_returns" USING btree ("assigned_delivery_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_active_driver_slot" ON "deliveries" USING btree ("driver_id","scheduled_date","departure_time") WHERE "deliveries"."status" <> 'cancelled';--> statement-breakpoint
 CREATE UNIQUE INDEX "unique_active_vehicle_slot" ON "deliveries" USING btree ("vehicle_id","scheduled_date","departure_time") WHERE "deliveries"."status" <> 'cancelled';--> statement-breakpoint
+CREATE INDEX "delivery_incidents_delivery_idx" ON "delivery_incidents" USING btree ("delivery_id");--> statement-breakpoint
+CREATE INDEX "delivery_incidents_status_idx" ON "delivery_incidents" USING btree ("status");--> statement-breakpoint
+CREATE INDEX "delivery_incidents_created_idx" ON "delivery_incidents" USING btree ("created_at");--> statement-breakpoint
 CREATE UNIQUE INDEX "delivery_notification_booking_event_channel" ON "delivery_notifications" USING btree ("booking_id","event_key","channel") WHERE "delivery_notifications"."lalamove_stop_id" is null;--> statement-breakpoint
 CREATE UNIQUE INDEX "delivery_notification_lalamove_stop_event_channel" ON "delivery_notifications" USING btree ("lalamove_stop_id","event_key","channel") WHERE "delivery_notifications"."lalamove_stop_id" is not null;--> statement-breakpoint
 CREATE INDEX "delivery_notification_status_idx" ON "delivery_notifications" USING btree ("status");--> statement-breakpoint

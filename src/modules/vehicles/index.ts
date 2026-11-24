@@ -88,6 +88,16 @@ export const vehicleRoutes = new Elysia({ prefix: "/vehicles" })
       query.limit ? Number(query.limit) : 10,
       query.search?.trim() ?? "",
       await staffWarehouse(user) ?? (query.warehouse_id ? Number(query.warehouse_id) : -1),
+      {
+        scheduledDate: query.scheduled_date?.trim() || undefined,
+        scheduledTime: query.scheduled_time?.trim() || undefined,
+        estimatedDurationMinutes: query.estimated_duration_minutes
+          ? Number(query.estimated_duration_minutes)
+          : undefined,
+        excludeDeliveryId: query.exclude_delivery_id
+          ? Number(query.exclude_delivery_id)
+          : undefined,
+      },
     );
 
     return result;

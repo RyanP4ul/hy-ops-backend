@@ -476,6 +476,90 @@ const inventory_data: InventoryInsert[] = [
     created_at: Math.floor(Date.now() / 1000),
     updated_at: Math.floor(Date.now() / 1000),
   },
+
+  // * Warehouse A - Linoleum Variants (product_id: 3, inventory IDs 25-29)
+  {
+    warehouse_id: 1,
+    product_id: 3,
+    product_variant_id: 13,
+    quantity: 100,
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  },
+  {
+    warehouse_id: 1,
+    product_id: 3,
+    product_variant_id: 14,
+    quantity: 100,
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  },
+  {
+    warehouse_id: 1,
+    product_id: 3,
+    product_variant_id: 15,
+    quantity: 100,
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  },
+  {
+    warehouse_id: 1,
+    product_id: 3,
+    product_variant_id: 16,
+    quantity: 100,
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  },
+  {
+    warehouse_id: 1,
+    product_id: 3,
+    product_variant_id: 17,
+    quantity: 100,
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  },
+
+  // * Warehouse B - Linoleum Variants (product_id: 3, inventory IDs 30-34)
+  {
+    warehouse_id: 2,
+    product_id: 3,
+    product_variant_id: 13,
+    quantity: 100,
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  },
+  {
+    warehouse_id: 2,
+    product_id: 3,
+    product_variant_id: 14,
+    quantity: 100,
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  },
+  {
+    warehouse_id: 2,
+    product_id: 3,
+    product_variant_id: 15,
+    quantity: 100,
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  },
+  {
+    warehouse_id: 2,
+    product_id: 3,
+    product_variant_id: 16,
+    quantity: 100,
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  },
+  {
+    warehouse_id: 2,
+    product_id: 3,
+    product_variant_id: 17,
+    quantity: 100,
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  },
 ];
 
 export async function productSeeds() {

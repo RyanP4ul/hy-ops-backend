@@ -220,14 +220,42 @@ export const userRoutes = new Elysia({
     );
     const search = query.search?.trim() ?? "";
     const warehouse_id = await staffWarehouse(user) ?? (query.warehouse_id ? Number(query.warehouse_id) : -1);
-    return await UserService.getAllDrivers(page, limit, search, warehouse_id);
+    return await UserService.getAllDrivers(page, limit, search, warehouse_id, {
+      includeMultiWarehouse: query.include_multi_warehouse === "true",
+      scheduledDate: query.scheduled_date?.trim() || undefined,
+      scheduledTime: query.scheduled_time?.trim() || undefined,
+      estimatedDurationMinutes: query.estimated_duration_minutes
+        ? Number(query.estimated_duration_minutes)
+        : undefined,
+      excludeDeliveryId: query.exclude_delivery_id
+        ? Number(query.exclude_delivery_id)
+        : undefined,
+    });
   }, {
     detail: {
       summary: "Get drivers",
-      description: "Retrieve driver accounts available to the current warehouse scope.",
+      description: "Retrieve driver accounts available to the current warehouse scope, optionally including multi-warehouse drivers and slot availability.",
       tags: ["Users"]
     }
-  });
+  })
+  .patch(
+    "/:id/multi-warehouse",
+    async ({ params, body, user }) =>
+      UserService.toggleDriverMultiWarehouse(
+        Number(params.id),
+        body.allow_multi_warehouse,
+        { id: Number(user.sub), tokenVersion: Number(user.token_version) },
+      ),
+    {
+      params: t.Object({ id: t.Numeric({ minimum: 1 }) }),
+      body: t.Object({ allow_multi_warehouse: t.Boolean() }),
+      detail: {
+        summary: "Toggle multi-warehouse driver reassignment",
+        description: "Allow or restrict a driver from being assigned across multiple warehouses.",
+        tags: ["Users"],
+      },
+    },
+  );
 // .post("/", async ({ body }) => UserService.createUser(body, { id: Number(user.sub), tokenVersion: Number(user.token_version) }), {
 //   body: t.Object({
 //     name: t.String({ minLength: 1, maxLength: 100 }),

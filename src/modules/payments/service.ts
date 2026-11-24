@@ -3,6 +3,7 @@ import { WorkflowError } from "../../utils/workflow-error";
 import { db } from "@/db/index";
 import {
   customers,
+  invoices,
   order_items,
   users,
   orders,
@@ -332,7 +333,15 @@ export abstract class PaymentService {
         );
       }
 
-      const [order] = await tx.select({ status: orders.status }).from(orders).where(eq(orders.id, payment.order_id));
+      const [order] = await tx
+        .select({
+          status: orders.status,
+          delivery_method: orders.delivery_method,
+          version: orders.version,
+        })
+        .from(orders)
+        .where(eq(orders.id, payment.order_id))
+        .for("update");
       if (!order || order.status === "CANCELLED") throw new WorkflowError("Payments cannot be collected for a cancelled or missing order.");
       const [orderTotal] = await tx
         .select({
@@ -384,6 +393,29 @@ export abstract class PaymentService {
         });
 
       if (!updated_payment) throw new WorkflowError("Payment changed. Refresh and try again.");
+
+      if (
+        isPaid &&
+        ["PENDING", "PROCESSING"].includes(order.status) &&
+        order.delivery_method !== "WALK_IN"
+      ) {
+        const now = new Date();
+        await tx
+          .update(orders)
+          .set({
+            status: "SCHEDULING",
+            payment_arrangement: "FULLY_PAID",
+            version: order.version + 1,
+            updated_at: now,
+          })
+          .where(eq(orders.id, payment.order_id));
+
+        await tx
+          .update(invoices)
+          .set({ status: "ISSUED", issue_date: now })
+          .where(and(eq(invoices.order_id, payment.order_id), eq(invoices.status, "DRAFT")));
+      }
+
       return {
         payment_number: updated_payment.payment_number,
         message: `Payment ${updated_payment.payment_number} updated successfully`,

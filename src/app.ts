@@ -41,6 +41,7 @@ import { orderRoutes } from "./modules/order";
 import { OrderService } from "./modules/order/service";
 import { deliveryScheduleRoutes } from "./modules/delivery-schedule";
 import { deliveriesRoutes } from "./modules/deliveries";
+import { incidentRoutes } from "./modules/incidents";
 import { calendarRoutes } from "./modules/calendar";
 import { paymentRoutes } from "./modules/payments";
 import { dashboardRoutes } from "./modules/dashboard";
@@ -329,6 +330,7 @@ export function createApp(
             .use(orderRoutes)
             .use(deliveryScheduleRoutes)
             .use(deliveriesRoutes)
+            .use(incidentRoutes)
             .use(calendarRoutes)
             .use(paymentRoutes)
             .use(automationRoutes)

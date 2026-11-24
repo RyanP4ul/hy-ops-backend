@@ -50,18 +50,18 @@ const orderItemData: OrderItemInsert[] = [
   // Order 2 - Linoleum 1mm x5
   {
     order_id: 2,
-    inventory_id: 3,
+    inventory_id: 29,
     quantity: 5,
   },
   // Order 3 - Tarpaulin S4 x3 and Linoleum .40mm x2
   {
     order_id: 3,
-    inventory_id: 1,
+    inventory_id: 4,
     quantity: 3,
   },
   {
     order_id: 3,
-    inventory_id: 3,
+    inventory_id: 27,
     quantity: 2,
   },
 ];

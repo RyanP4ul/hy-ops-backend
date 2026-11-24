@@ -118,6 +118,7 @@ export const drivers = pgTable("drivers", {
     }),
   status: driverStatusEnums().notNull().default("available"),
   phone_number: varchar().notNull(),
+  allow_multi_warehouse: boolean().notNull().default(false),
 });
 
 export type DriverInsert = typeof drivers.$inferInsert;

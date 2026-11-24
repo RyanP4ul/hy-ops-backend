@@ -1,12 +1,30 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { db } from "../../db";
-import { customer_returns, deliveries, deliveries_stops, orders, users, vehicles, warehouses } from "../../db/schema";
+import { customer_returns, deliveries, deliveries_stops, orders, settings, users, vehicles, warehouses } from "../../db/schema";
 
 /** Project real runs directly: rescheduling/cancellation never leaves copied calendar events behind. */
 export async function getDeliveryCalendar(warehouseId?: number) {
-  const runs = await db.select({ id: deliveries.id, version: deliveries.version, date: deliveries.scheduled_date,
-    start_time: deliveries.departure_time, status: deliveries.status, driver: users.name,
-    vehicle: vehicles.plate_number, warehouse: warehouses.name, warehouseId: warehouses.id })
+  const [globalLimitRow] = await db
+    .select({ value: settings.value })
+    .from(settings)
+    .where(eq(settings.name, "order_limit_per_day"));
+  const parsedGlobal = Number(globalLimitRow?.value);
+  const globalDailyCapacity =
+    Number.isInteger(parsedGlobal) && parsedGlobal > 0 ? parsedGlobal : 5;
+
+  const runs = await db.select({
+    id: deliveries.id,
+    version: deliveries.version,
+    date: deliveries.scheduled_date,
+    start_time: deliveries.departure_time,
+    estimated_duration_minutes: deliveries.estimated_duration_minutes,
+    status: deliveries.status,
+    driver: users.name,
+    vehicle: vehicles.plate_number,
+    warehouse: warehouses.name,
+    warehouseId: warehouses.id,
+    warehouseDailyLimit: warehouses.daily_order_limit,
+  })
     .from(deliveries).innerJoin(users, eq(users.id, deliveries.driver_id))
     .innerJoin(vehicles, eq(vehicles.id, deliveries.vehicle_id)).innerJoin(warehouses, eq(warehouses.id, vehicles.warehouse_id))
     .where(warehouseId === undefined ? undefined : eq(vehicles.warehouse_id, warehouseId))
@@ -19,6 +37,13 @@ export async function getDeliveryCalendar(warehouseId?: number) {
     .where(inArray(deliveries_stops.delivery_id, ids)).orderBy(asc(deliveries_stops.delivery_id), asc(deliveries_stops.leg_index), asc(deliveries_stops.id));
   const pickups = await db.select({ deliveryId: customer_returns.assigned_delivery_id }).from(customer_returns)
     .where(and(inArray(customer_returns.assigned_delivery_id, ids), inArray(customer_returns.status, ["assigned", "collected", "received"])));
-  return runs.map(run => ({ ...run, orders: stops.filter(stop => stop.deliveryId === run.id).map(({ deliveryId: _, ...order }) => order),
-    pickupCount: pickups.filter(pickup => pickup.deliveryId === run.id).length }));
+  return runs.map(({ warehouseDailyLimit, ...run }) => ({
+    ...run,
+    daily_capacity:
+      warehouseDailyLimit && warehouseDailyLimit > 0
+        ? warehouseDailyLimit
+        : globalDailyCapacity,
+    orders: stops.filter(stop => stop.deliveryId === run.id).map(({ deliveryId: _, ...order }) => order),
+    pickupCount: pickups.filter(pickup => pickup.deliveryId === run.id).length,
+  }));
 }

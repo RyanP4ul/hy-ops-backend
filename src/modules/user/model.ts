@@ -17,7 +17,7 @@ const customerProfileSchema = t.Object({
   barangay: t.String({ minLength: 1 }),
   city_municipality: t.String({ minLength: 1 }),
   province: t.String({ minLength: 1 }),
-  postal_code: t.String(),
+  postal_code: t.String({ minLength: 1, maxLength: 20, pattern: "\\S" }),
   latitude: t.String(),
   longitude: t.String(),
 });
@@ -27,6 +27,7 @@ const driverProfileSchema = t.Object({
   status: t.String(),
   warehouse_name: t.String(),
   phone_number: t.String(),
+  allow_multi_warehouse: t.Optional(t.Boolean()),
 });
 
 const userAdminSchema = t.Object({

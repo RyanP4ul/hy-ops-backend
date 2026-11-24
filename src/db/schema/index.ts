@@ -29,4 +29,5 @@ export * from "./driver-sync";
 export * from "./driver-engagement";
 export * from "./customer-returns";
 export * from "./delivery-notifications";
+export * from "./delivery-incidents";
 export * from "./stock-transfers";

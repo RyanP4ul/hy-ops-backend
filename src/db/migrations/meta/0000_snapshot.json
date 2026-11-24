@@ -1,5 +1,5 @@
 {
-  "id": "4e33c9ab-3f49-4506-8649-c0f9cc3b0cf5",
+  "id": "cf418d51-3d84-4718-9ab0-061fdf2bad37",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -1643,6 +1643,251 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.delivery_incidents": {
+      "name": "delivery_incidents",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "delivery_incidents_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "delivery_id": {
+          "name": "delivery_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "stop_id": {
+          "name": "stop_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "vehicle_id": {
+          "name": "vehicle_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reported_by": {
+          "name": "reported_by",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "category": {
+          "name": "category",
+          "type": "delivery_incident_category",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "severity": {
+          "name": "severity",
+          "type": "delivery_incident_severity",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'medium'"
+        },
+        "status": {
+          "name": "status",
+          "type": "delivery_incident_status",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'open'"
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status_notes": {
+          "name": "status_notes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "estimated_delay_minutes": {
+          "name": "estimated_delay_minutes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "latitude": {
+          "name": "latitude",
+          "type": "numeric(9, 6)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "longitude": {
+          "name": "longitude",
+          "type": "numeric(9, 6)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resolved_by": {
+          "name": "resolved_by",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resolved_at": {
+          "name": "resolved_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "delivery_incidents_delivery_idx": {
+          "name": "delivery_incidents_delivery_idx",
+          "columns": [
+            {
+              "expression": "delivery_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "delivery_incidents_status_idx": {
+          "name": "delivery_incidents_status_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "delivery_incidents_created_idx": {
+          "name": "delivery_incidents_created_idx",
+          "columns": [
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "delivery_incidents_delivery_id_deliveries_id_fk": {
+          "name": "delivery_incidents_delivery_id_deliveries_id_fk",
+          "tableFrom": "delivery_incidents",
+          "tableTo": "deliveries",
+          "columnsFrom": [
+            "delivery_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "cascade"
+        },
+        "delivery_incidents_stop_id_deliveries_stops_id_fk": {
+          "name": "delivery_incidents_stop_id_deliveries_stops_id_fk",
+          "tableFrom": "delivery_incidents",
+          "tableTo": "deliveries_stops",
+          "columnsFrom": [
+            "stop_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "cascade"
+        },
+        "delivery_incidents_vehicle_id_vehicles_id_fk": {
+          "name": "delivery_incidents_vehicle_id_vehicles_id_fk",
+          "tableFrom": "delivery_incidents",
+          "tableTo": "vehicles",
+          "columnsFrom": [
+            "vehicle_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "cascade"
+        },
+        "delivery_incidents_reported_by_users_id_fk": {
+          "name": "delivery_incidents_reported_by_users_id_fk",
+          "tableFrom": "delivery_incidents",
+          "tableTo": "users",
+          "columnsFrom": [
+            "reported_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "cascade"
+        },
+        "delivery_incidents_resolved_by_users_id_fk": {
+          "name": "delivery_incidents_resolved_by_users_id_fk",
+          "tableFrom": "delivery_incidents",
+          "tableTo": "users",
+          "columnsFrom": [
+            "resolved_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
           "onUpdate": "cascade"
         }
       },
@@ -3380,7 +3625,7 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "default": 1795179844
+          "default": 1795500871
         }
       },
       "indexes": {
@@ -4895,6 +5140,13 @@
           "type": "varchar",
           "primaryKey": false,
           "notNull": true
+        },
+        "allow_multi_warehouse": {
+          "name": "allow_multi_warehouse",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         }
       },
       "indexes": {},
@@ -6718,6 +6970,37 @@
         "LALAMOVE",
         "PICKUP",
         "INTERNAL"
+      ]
+    },
+    "public.delivery_incident_category": {
+      "name": "delivery_incident_category",
+      "schema": "public",
+      "values": [
+        "DELAY",
+        "TRAFFIC",
+        "BREAKDOWN",
+        "ACCIDENT",
+        "WEATHER",
+        "OTHER"
+      ]
+    },
+    "public.delivery_incident_severity": {
+      "name": "delivery_incident_severity",
+      "schema": "public",
+      "values": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "public.delivery_incident_status": {
+      "name": "delivery_incident_status",
+      "schema": "public",
+      "values": [
+        "open",
+        "acknowledged",
+        "resolved"
       ]
     },
     "public.order_status": {

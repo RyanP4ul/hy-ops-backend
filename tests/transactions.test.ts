@@ -689,7 +689,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     await sql`insert into drivers (user_id,warehouse_id,phone_number) values (4,1,'09000000000')`;
     await sql`insert into vehicles (warehouse_id,plate_number,created_at,updated_at) values (1,'BATCH-001',0,0)`;
     await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
-    const address = await OrderService.saveShippingAddress(1, { address_line: "Batch second destination", barangay: "B", city_municipality: "C", province: "P", latitude: 14.7, longitude: 121.3 });
+    const address = await OrderService.saveShippingAddress(1, { address_line: "Batch second destination", barangay: "B", city_municipality: "C", province: "P", postal_code: "3000", latitude: 14.7, longitude: 121.3 });
     const input = batchInput([1, address.id], 2);
     input.orders[0].amount_paid = 5;
     const created = await OrderService.createOrders(input);
@@ -744,7 +744,7 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     await seed();
     await sql`update settings set value='1' where name='customer_order_limit'`;
     await InventoryService.createInventory({ warehouse_id: 1, product_variant_id: 1, quantity: 10 });
-    const address = await OrderService.saveShippingAddress(1, { address_line: "Second destination", barangay: "Other barangay", city_municipality: "Other city", province: "Province", latitude: 14.7, longitude: 121.3 });
+    const address = await OrderService.saveShippingAddress(1, { address_line: "Second destination", barangay: "Other barangay", city_municipality: "Other city", province: "Province", postal_code: "3000", latitude: 14.7, longitude: 121.3 });
     const created = await Promise.all([stockOrder(1, 5), stockOrder(2, 0, 1, address.id)]);
     expect(created).toHaveLength(2);
     expect((await OrderService.getCustomerOrderEligibility(1))).toMatchObject({ eligible: true, activeOrderCount: 2, maxActiveOrders: null });
@@ -779,12 +779,12 @@ describe.skipIf(!testUrl)("disposable PostgreSQL transactions", () => {
     expect((await sql`select reserved from inventory`)[0].reserved).toBe(0);
     const order = await OrderService.createOrder({ ...input, shipping_latitude: 16, shipping_longitude: 123, shipping_address: "Spoofed destination" });
     expect(await OrderService.getOrderById(order.id)).toMatchObject({ shipping_latitude: "14.500000", shipping_longitude: "121.100000" });
-    await rejected(() => OrderService.saveShippingAddress(1, { address_line: "Street", barangay: "B", city_municipality: "C", province: "P", latitude: 0, longitude: 0 }), "coordinates");
+    await rejected(() => OrderService.saveShippingAddress(1, { address_line: "Street", barangay: "B", city_municipality: "C", province: "P", postal_code: "3000", latitude: 0, longitude: 0 }), "coordinates");
   });
 
   test("same-customer orders keep independent stops, navigation, payments and outcomes", async () => {
     const { order: first, data } = await readyDelivery();
-    const address = await OrderService.saveShippingAddress(1, { address_line: "Second stop", barangay: "B", city_municipality: "C", province: "P", latitude: 14.7, longitude: 121.3 });
+    const address = await OrderService.saveShippingAddress(1, { address_line: "Second stop", barangay: "B", city_municipality: "C", province: "P", postal_code: "3000", latitude: 14.7, longitude: 121.3 });
     const second = await stockOrder(1, 5, 1, address.id);
     await OrderService.processOrder(second.id, 1);
     await OrderService.deliveryOrder(second.id, 2);

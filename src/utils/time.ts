@@ -1,5 +1,8 @@
 export const DAY = 864e5;
 export const TZ = "Asia/Manila";
+export const DEPARTURE_GRACE_MINUTES = 60;
+export const RETURN_GRACE_MINUTES = 60;
+export const DRIVER_START_EARLY_WINDOW_MINUTES = 60;
 
 export const manilaDay = (d: Date | number) =>
   new Date(d).toLocaleDateString("en-CA", { timeZone: TZ });
@@ -22,13 +25,43 @@ export function toManilaIso(date: string, time: string): string {
   return `${date}T${normalized}+08:00`;
 }
 
+/**
+ * A scheduled trip becomes overdue only after the departure grace window
+ * (at least 1 hour past the scheduled departure time) has elapsed.
+ */
 export function isScheduledTripOverdue(
   date: string,
   time: string,
   now = Date.now(),
+  graceMinutes = DEPARTURE_GRACE_MINUTES,
 ): boolean {
   const scheduledAt = Date.parse(toManilaIso(date, time));
-  return Number.isFinite(scheduledAt) && scheduledAt < now;
+  if (!Number.isFinite(scheduledAt)) return false;
+  const effectiveGraceMs = Math.max(0, graceMinutes) * 60_000;
+  return scheduledAt + effectiveGraceMs < now;
+}
+
+/**
+ * Drivers can start a trip within a flexible window starting up to 1 hour
+ * before scheduled departure and lasting through the scheduled Manila day
+ * (or at least 1 hour past departure for late-evening trips).
+ */
+export function canDriverStartTripAt(
+  date: string,
+  time: string,
+  now = Date.now(),
+  earlyMinutes = DRIVER_START_EARLY_WINDOW_MINUTES,
+  lateGraceMinutes = DEPARTURE_GRACE_MINUTES,
+): boolean {
+  const scheduledAt = Date.parse(toManilaIso(date, time));
+  if (!Number.isFinite(scheduledAt)) return false;
+  const earliestMs = scheduledAt - Math.max(0, earlyMinutes) * 60_000;
+  const endOfScheduledDayMs = dayStart(date) + DAY - 1;
+  const latestMs = Math.max(
+    endOfScheduledDayMs,
+    scheduledAt + Math.max(0, lateGraceMinutes) * 60_000,
+  );
+  return now >= earliestMs && now <= latestMs;
 }
 
 /**

@@ -26,6 +26,10 @@ import {
 } from "../../db/schema";
 import { WorkflowError } from "../../utils/workflow-error";
 import { minorUnitsToMoney, moneyToMinorUnits } from "../../utils/money";
+import {
+  DRIVER_START_EARLY_WINDOW_MINUTES,
+  toManilaIso,
+} from "../../utils/time";
 import { assertDriverOwnership, assertOutcomeCommand } from "./policy";
 import { currentStopPlan } from "./stop-plan";
 import { commandHash, replayReceipt, saveReceipt } from "./sync-receipts";
@@ -259,6 +263,10 @@ export class DriverService {
           canFail: run.status === "in_transit" && stop.status === "pending",
         });
       }
+      const scheduledAtIso = toManilaIso(run.scheduled_date, run.departure_time);
+      const canStartFromIso = new Date(
+        Date.parse(scheduledAtIso) - DRIVER_START_EARLY_WINDOW_MINUTES * 60_000,
+      ).toISOString();
       return {
         id: run.id,
         status: run.status,
@@ -266,7 +274,9 @@ export class DriverService {
         stopPlan: currentStopPlan(run.driver_stop_plan, actorId, run.status, stops.map(s => s.stop)),
         scheduledDate: run.scheduled_date,
         departureTime: run.departure_time,
-        scheduledAt: `${run.scheduled_date}T${run.departure_time}+08:00`,
+        scheduledAt: scheduledAtIso,
+        startWindowMinutes: DRIVER_START_EARLY_WINDOW_MINUTES,
+        canStartFrom: canStartFromIso,
         kind: run.delivery_type,
         vehicle: {
           id: vehicle.id,

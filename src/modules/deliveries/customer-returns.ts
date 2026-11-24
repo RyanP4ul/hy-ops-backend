@@ -1,7 +1,7 @@
 import { stockTransaction } from "../inventory/transaction";
 import { commandHash, replayReceipt, saveReceipt } from "../driver/sync-receipts";
 import { activeUser, activeVehicle, activeWarehouse } from "../lifecycle/availability";
-import { and, asc, count, eq, inArray, notInArray, sql } from "drizzle-orm";
+import { and, asc, count, eq, inArray, notInArray, or, sql } from "drizzle-orm";
 import { db } from "../../db";
 import {
   customer_returns,
@@ -320,7 +320,10 @@ export class CustomerReturnService {
       .innerJoin(users, eq(users.id, drivers.user_id))
       .where(
         and(
-          eq(drivers.warehouse_id, task.warehouse_id),
+          or(
+            eq(drivers.warehouse_id, task.warehouse_id),
+            eq(drivers.allow_multi_warehouse, true),
+          ),
           eq(drivers.status, "available"),
           eq(users.role, "driver"),
           activeUser(),
@@ -418,10 +421,11 @@ export class CustomerReturnService {
           !vehicle ||
           !driver ||
           vehicle.warehouse_id !== task.warehouse_id ||
-          driver.warehouse_id !== task.warehouse_id
+          (driver.warehouse_id !== task.warehouse_id &&
+            !driver.allow_multi_warehouse)
         )
           throw new WorkflowError(
-            "Choose a vehicle and driver from the order's warehouse.",
+            "Choose a vehicle from the order's warehouse and a driver assigned to it (or with multi-warehouse enabled).",
             403,
           );
         const [account] = await tx

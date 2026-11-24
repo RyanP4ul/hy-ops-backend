@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { moneyToMinorUnits, minorUnitsToMoney } from "./money";
-import { isScheduledTripOverdue, todayInManila } from "./time";
+import { canDriverStartTripAt, isScheduledTripOverdue, todayInManila } from "./time";
+import { generateHyphenatedSku, isValidSku } from "../modules/products/sku";
 import { auditTarget, redactAuditPayload } from "./audit";
 import { canSendRequest, canSubscribe } from "../ws/authorization";
 import { allowedOrigin, currentSession, mayAccess } from "../modules/auth/policy";
@@ -15,11 +16,27 @@ test("centavo calculations are exact and reject malformed amounts", () => {
   for (const value of ["", "1.234", "NaN", Infinity, NaN, "0x10"]) expect(() => moneyToMinorUnits(value)).toThrow();
 });
 
-test("overdue schedules and calendar days use Manila", () => {
-  const now = Date.parse("2026-10-30T00:00:00Z");
-  expect(isScheduledTripOverdue("2026-10-30", "07:59", now)).toBe(true);
+test("overdue schedules and calendar days use Manila with at least 1-hour departure grace", () => {
+  const now = Date.parse("2026-10-30T00:00:00Z"); // 08:00 Manila
+  expect(isScheduledTripOverdue("2026-10-30", "06:59", now)).toBe(true); // 61m past departure -> overdue
+  expect(isScheduledTripOverdue("2026-10-30", "07:00", now)).toBe(false); // exactly 60m past -> still inside 1h grace
+  expect(isScheduledTripOverdue("2026-10-30", "07:59", now)).toBe(false); // 1m past -> still inside 1h grace
   expect(isScheduledTripOverdue("2026-10-30", "08:00", now)).toBe(false);
   expect(todayInManila(new Date("2026-10-29T16:00:00Z"))).toBe("2026-10-30");
+
+  // Driver flexible 1-hour early start window
+  expect(canDriverStartTripAt("2026-10-30", "09:01", now)).toBe(false); // 61m early -> blocked
+  expect(canDriverStartTripAt("2026-10-30", "09:00", now)).toBe(true); // 60m early -> allowed
+  expect(canDriverStartTripAt("2026-10-30", "08:30", now)).toBe(true); // 30m early -> allowed
+  expect(canDriverStartTripAt("2026-10-30", "08:00", now)).toBe(true); // on time -> allowed
+});
+
+test("automated hyphenated SKU generator creates deterministic collision-safe SKUs", () => {
+  expect(generateHyphenatedSku("Linoleum", ".32mm")).toBe("HY-LN-32MM");
+  expect(generateHyphenatedSku("Tarpaulin", "S4")).toBe("HY-TP-S4");
+  expect(generateHyphenatedSku("Linoleum", ".32mm", ["HY-LN-32MM"])).toBe("HY-LN-32MM-2");
+  expect(isValidSku("HY-LN-32MM")).toBe(true);
+  expect(isValidSku("HY-")).toBe(false);
 });
 
 test("audit targets identify subresource owners and redact nested credentials", () => {

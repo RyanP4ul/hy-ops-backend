@@ -315,6 +315,7 @@ export abstract class UserService {
         warehouse_name: warehouses.name,
         status: drivers.status,
         phone_number: drivers.phone_number,
+        allow_multi_warehouse: drivers.allow_multi_warehouse,
       })
       .from(drivers)
       .leftJoin(warehouses, eq(warehouses.id, drivers.warehouse_id))
@@ -399,6 +400,7 @@ export abstract class UserService {
             user_id: user.id,
             status: (data.profile?.status ?? "available") as DriverStatus,
             phone_number: data.profile?.phone_number ?? "",
+            allow_multi_warehouse: Boolean(data.profile?.allow_multi_warehouse),
           });
           break;
       }
@@ -500,15 +502,28 @@ export abstract class UserService {
           break;
         }
         case "driver": {
+          const allowMultiWarehouse =
+            data.profile?.allow_multi_warehouse ?? undefined;
           const updated = await tx
             .update(drivers)
             .set({
               warehouse_id: data.profile?.warehouse_id ?? 0,
               status: (data.profile?.status ?? "available") as DriverStatus,
               phone_number: data.profile?.phone_number ?? "",
+              ...(allowMultiWarehouse === undefined
+                ? {}
+                : { allow_multi_warehouse: allowMultiWarehouse }),
             })
             .where(eq(drivers.user_id, id)).returning({ id: drivers.id });
-          if (!updated.length) await tx.insert(drivers).values({ user_id: id, warehouse_id: data.profile?.warehouse_id ?? 0, status: (data.profile?.status ?? "available") as DriverStatus, phone_number: data.profile?.phone_number ?? "" });
+          if (!updated.length) {
+            await tx.insert(drivers).values({
+              user_id: id,
+              warehouse_id: data.profile?.warehouse_id ?? 0,
+              status: (data.profile?.status ?? "available") as DriverStatus,
+              phone_number: data.profile?.phone_number ?? "",
+              allow_multi_warehouse: Boolean(allowMultiWarehouse),
+            });
+          }
           break;
         }
       }
@@ -614,31 +629,78 @@ export abstract class UserService {
     }).then((result) => { revokeLiveSessions(userId); return result; });
   }
 
+  static async toggleDriverMultiWarehouse(
+    userId: number,
+    allowMultiWarehouse: boolean,
+    actor: MutationActor,
+  ) {
+    return db.transaction(async (tx) => {
+      await lockUserMutation(tx, actor);
+      const [user] = await tx
+        .select({ id: users.id, name: users.name, role: users.role })
+        .from(users)
+        .where(and(eq(users.id, userId), eq(users.is_archived, false)));
+      if (!user || user.role !== "driver") {
+        throw new WorkflowError("Driver account not found.", 404);
+      }
+      const [updated] = await tx
+        .update(drivers)
+        .set({ allow_multi_warehouse: allowMultiWarehouse })
+        .where(eq(drivers.user_id, userId))
+        .returning({
+          user_id: drivers.user_id,
+          allow_multi_warehouse: drivers.allow_multi_warehouse,
+        });
+      if (!updated) throw new WorkflowError("Driver profile not found.", 404);
+      return {
+        id: user.id,
+        allow_multi_warehouse: updated.allow_multi_warehouse,
+        message: updated.allow_multi_warehouse
+          ? `${user.name} can now be assigned across multiple warehouses.`
+          : `${user.name} is now restricted to their home warehouse.`,
+      };
+    });
+  }
+
   static async getAllDrivers(
     page: number = 1,
     limit: number = 10,
     search: string = "",
     warehouse_id: number = -1,
+    options?: {
+      includeMultiWarehouse?: boolean;
+      scheduledDate?: string;
+      scheduledTime?: string;
+      estimatedDurationMinutes?: number;
+      excludeDeliveryId?: number;
+    },
   ) {
     const is_search_empty = search.length === 0;
     const offset = is_search_empty ? Math.max(page * limit, 0) : 0;
     const whereQuery = ilike(users.name, `%${search}%`);
+    const warehouseFilter =
+      warehouse_id !== -1
+        ? options?.includeMultiWarehouse
+          ? or(
+              eq(drivers.warehouse_id, warehouse_id),
+              eq(drivers.allow_multi_warehouse, true),
+            )
+          : eq(drivers.warehouse_id, warehouse_id)
+        : undefined;
+
+    const baseWhere = and(
+      eq(users.role, "driver"),
+      operationalUser(),
+      eq(drivers.status, "available"),
+      is_search_empty ? undefined : whereQuery,
+      warehouseFilter,
+    );
 
     const [total_result] = await db
       .select({ count: count() })
       .from(users)
       .leftJoin(drivers, eq(drivers.user_id, users.id))
-      .where(
-        and(
-          eq(users.role, "driver"),
-          operationalUser(),
-          eq(drivers.status, "available"),
-          is_search_empty ? undefined : whereQuery,
-          warehouse_id !== -1
-            ? eq(drivers.warehouse_id, warehouse_id)
-            : undefined,
-        ),
-      );
+      .where(baseWhere);
 
     const drivers_query = await db
       .select({
@@ -646,26 +708,88 @@ export abstract class UserService {
         name: users.name,
         status: drivers.status,
         phone_number: drivers.phone_number,
+        warehouse_id: drivers.warehouse_id,
+        warehouse_name: warehouses.name,
+        allow_multi_warehouse: drivers.allow_multi_warehouse,
       })
       .from(users)
       .leftJoin(drivers, eq(drivers.user_id, users.id))
-      .where(
-        and(
-          eq(users.role, "driver"),
-          eq(drivers.status, "available"),
-          operationalUser(),
-          is_search_empty ? undefined : whereQuery,
-          warehouse_id !== -1
-            ? eq(drivers.warehouse_id, warehouse_id)
-            : undefined,
-        ),
-      )
+      .leftJoin(warehouses, eq(warehouses.id, drivers.warehouse_id))
+      .where(baseWhere)
       .orderBy(desc(users.id))
       .offset(offset)
       .limit(limit);
 
+    let bookedByDriver = new Map<
+      number,
+      { delivery_id: number; departure_time: string; estimated_duration_minutes: number | null; status: string }[]
+    >();
+    if (options?.scheduledDate && drivers_query.length > 0) {
+      const driverIds = drivers_query.map((d) => d.id);
+      const runs = await db
+        .select({
+          id: deliveries.id,
+          driver_id: deliveries.driver_id,
+          departure_time: deliveries.departure_time,
+          estimated_duration_minutes: deliveries.estimated_duration_minutes,
+          status: deliveries.status,
+        })
+        .from(deliveries)
+        .where(
+          and(
+            eq(deliveries.scheduled_date, options.scheduledDate),
+            inArray(deliveries.status, ["scheduled", "in_transit", "returning"]),
+            inArray(deliveries.driver_id, driverIds),
+          ),
+        );
+      for (const run of runs) {
+        if (options.excludeDeliveryId && run.id === options.excludeDeliveryId) continue;
+        const list = bookedByDriver.get(run.driver_id) ?? [];
+        list.push({
+          delivery_id: run.id,
+          departure_time: run.departure_time,
+          estimated_duration_minutes: run.estimated_duration_minutes,
+          status: run.status,
+        });
+        bookedByDriver.set(run.driver_id, list);
+      }
+    }
+
+    const parseMin = (value: string) => {
+      const [h = "0", m = "0"] = value.split(":");
+      return Number(h) * 60 + Number(m);
+    };
+    const windowMin = (est?: number | null) =>
+      est && Number.isFinite(est) && est > 0 ? Math.min(1440, Math.max(60, Math.round(est) + 60)) : 120;
+
+    const enriched = drivers_query.map((driver) => {
+      const booked = bookedByDriver.get(driver.id) ?? [];
+      let conflict_reason: string | null = null;
+      if (options?.scheduledDate && options?.scheduledTime && booked.length > 0) {
+        const reqStart = parseMin(options.scheduledTime);
+        const reqEnd = reqStart + windowMin(options.estimatedDurationMinutes);
+        for (const run of booked) {
+          const runStart = parseMin(run.departure_time);
+          const runEnd = runStart + windowMin(run.estimated_duration_minutes);
+          if (reqStart < runEnd && runStart < reqEnd) {
+            conflict_reason = `Booked on Delivery #${run.delivery_id} at ${run.departure_time.slice(0, 5)}`;
+            break;
+          }
+        }
+      }
+      return {
+        ...driver,
+        is_cross_warehouse:
+          warehouse_id !== -1 && driver.warehouse_id !== warehouse_id,
+        trips_today: booked.length,
+        booked_windows: booked,
+        is_available_for_slot: conflict_reason === null,
+        conflict_reason,
+      };
+    });
+
     return {
-      rows: drivers_query,
+      rows: enriched,
       total: total_result?.count ?? 0,
     };
   }

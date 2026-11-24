@@ -1,5 +1,6 @@
 import { CustomerReturnService } from "../deliveries/customer-returns";
 import { DeliveryService } from "../deliveries/service";
+import { IncidentService } from "../incidents/service";
 import { proofService } from "./proofs";
 import { vehicleService } from "../vehicles/service";
 import Elysia, { t } from "elysia";
@@ -54,6 +55,39 @@ export function createDriverRoutes(proofs = proofService) { return new Elysia({ 
       detail: { summary: 'Get trips by id', description: 'GET endpoint for trips by id in the drivers module.', tags: ['Drivers'] }, params })
   .post("/trips/:id/start", ({ user, params, body }) => DeliveryService.dispatchDelivery(params.id, undefined, { driverId: Number(user.sub), version: body.version }), {
       detail: { summary: 'Create trips by id start', description: 'POST endpoint for trips by id start in the drivers module.', tags: ['Drivers'] }, params, body: t.Object({ version: t.Integer({ minimum: 1 }) }) })
+  .get("/trips/:id/incidents", ({ user, params }) => IncidentService.listDriverTripIncidents(Number(user.sub), params.id), {
+      detail: { summary: 'List incidents reported for a driver trip', tags: ['Drivers', 'Incidents'] }, params })
+  .post("/trips/:id/incidents", ({ user, params, body }) => IncidentService.createIncident({ delivery_id: params.id, ...body }, { id: Number(user.sub), role: "driver" }), {
+      detail: { summary: 'Report a transit incident on an assigned trip', tags: ['Drivers', 'Incidents'] },
+      params,
+      body: t.Object({
+        stop_id: t.Optional(t.Nullable(t.Integer({ minimum: 1 }))),
+        category: t.Union([
+          t.Literal("DELAY"),
+          t.Literal("TRAFFIC"),
+          t.Literal("BREAKDOWN"),
+          t.Literal("ACCIDENT"),
+          t.Literal("WEATHER"),
+          t.Literal("OTHER"),
+        ]),
+        severity: t.Optional(
+          t.Union([
+            t.Literal("low"),
+            t.Literal("medium"),
+            t.Literal("high"),
+            t.Literal("critical"),
+          ]),
+        ),
+        description: t.String({ minLength: 1, maxLength: 1000 }),
+        status_notes: t.Optional(t.Nullable(t.String({ maxLength: 1000 }))),
+        estimated_delay_minutes: t.Optional(
+          t.Nullable(t.Integer({ minimum: 0, maximum: 1440 })),
+        ),
+        latitude: t.Optional(t.Nullable(t.Number({ minimum: -90, maximum: 90 }))),
+        longitude: t.Optional(
+          t.Nullable(t.Number({ minimum: -180, maximum: 180 })),
+        ),
+      }) })
   .get("/history", ({ user, query }) => DriverService.history(Number(user.sub), query.page, query.pageSize, query), {
       detail: { summary: 'Get history', description: 'GET endpoint for history in the drivers module.', tags: ['Drivers'] }, query: historyQuery })
   .get("/stops/:id/proofs", ({ user, params }) => proofs.list(user, params.id), {

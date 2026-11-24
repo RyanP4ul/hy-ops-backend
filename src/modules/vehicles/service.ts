@@ -591,6 +591,12 @@ export abstract class VehicleService {
     limit: number,
     search: string,
     warehouse_id: number = -1,
+    options?: {
+      scheduledDate?: string;
+      scheduledTime?: string;
+      estimatedDurationMinutes?: number;
+      excludeDeliveryId?: number;
+    },
   ) {
     const offset = search.length === 0 ? Math.max(page * limit, 0) : 0;
     const whereQuery = search.length
@@ -635,7 +641,80 @@ export abstract class VehicleService {
         .offset(offset),
     ]);
 
-    return { rows, total: totalResult?.count ?? 0 };
+    const seenIds = new Set<number>();
+    const uniqueRows = rows.filter((row) => {
+      if (seenIds.has(row.id)) return false;
+      seenIds.add(row.id);
+      return true;
+    });
+
+    const bookedByVehicle = new Map<
+      number,
+      { delivery_id: number; departure_time: string; estimated_duration_minutes: number | null; status: string }[]
+    >();
+    if (options?.scheduledDate && uniqueRows.length > 0) {
+      const vehicleIds = uniqueRows.map((v) => v.id);
+      const runs = await db
+        .select({
+          id: deliveries.id,
+          vehicle_id: deliveries.vehicle_id,
+          departure_time: deliveries.departure_time,
+          estimated_duration_minutes: deliveries.estimated_duration_minutes,
+          status: deliveries.status,
+        })
+        .from(deliveries)
+        .where(
+          and(
+            eq(deliveries.scheduled_date, options.scheduledDate),
+            inArray(deliveries.status, ["scheduled", "in_transit", "returning"]),
+            inArray(deliveries.vehicle_id, vehicleIds),
+          ),
+        );
+      for (const run of runs) {
+        if (options.excludeDeliveryId && run.id === options.excludeDeliveryId) continue;
+        const list = bookedByVehicle.get(run.vehicle_id) ?? [];
+        list.push({
+          delivery_id: run.id,
+          departure_time: run.departure_time,
+          estimated_duration_minutes: run.estimated_duration_minutes,
+          status: run.status,
+        });
+        bookedByVehicle.set(run.vehicle_id, list);
+      }
+    }
+
+    const parseMin = (value: string) => {
+      const [h = "0", m = "0"] = value.split(":");
+      return Number(h) * 60 + Number(m);
+    };
+    const windowMin = (est?: number | null) =>
+      est && Number.isFinite(est) && est > 0 ? Math.min(1440, Math.max(60, Math.round(est) + 60)) : 120;
+
+    const enriched = uniqueRows.map((vehicle) => {
+      const booked = bookedByVehicle.get(vehicle.id) ?? [];
+      let conflict_reason: string | null = null;
+      if (options?.scheduledDate && options?.scheduledTime && booked.length > 0) {
+        const reqStart = parseMin(options.scheduledTime);
+        const reqEnd = reqStart + windowMin(options.estimatedDurationMinutes);
+        for (const run of booked) {
+          const runStart = parseMin(run.departure_time);
+          const runEnd = runStart + windowMin(run.estimated_duration_minutes);
+          if (reqStart < runEnd && runStart < reqEnd) {
+            conflict_reason = `Booked on Delivery #${run.delivery_id} at ${run.departure_time.slice(0, 5)}`;
+            break;
+          }
+        }
+      }
+      return {
+        ...vehicle,
+        trips_today: booked.length,
+        booked_windows: booked,
+        is_available_for_slot: conflict_reason === null,
+        conflict_reason,
+      };
+    });
+
+    return { rows: enriched, total: totalResult?.count ?? 0 };
   }
 }
 

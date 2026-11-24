@@ -33,7 +33,7 @@ export const savedShippingAddressSchema = t.Object({
   barangay: t.String({ minLength: 1, maxLength: 100, pattern: "\\S" }),
   city_municipality: t.String({ minLength: 1, maxLength: 100, pattern: "\\S" }),
   province: t.String({ minLength: 1, maxLength: 100, pattern: "\\S" }),
-  postal_code: t.Optional(t.String({ maxLength: 20 })),
+  postal_code: t.String({ minLength: 1, maxLength: 20, pattern: "\\S" }),
   latitude: t.Number({ minimum: -90, maximum: 90 }),
   longitude: t.Number({ minimum: -180, maximum: 180 }),
 });

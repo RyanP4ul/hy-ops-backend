@@ -7,7 +7,7 @@ export const productModel = new Elysia().model({
       t.Object({
         name: t.String({ minLength: 1, maxLength: 60 }),
         description: t.Optional(t.String({ maxLength: 255 })),
-        sku: t.String({ minLength: 1, maxLength: 60 }),
+        sku: t.Optional(t.String({ maxLength: 60 })),
         price: t.String({ pattern: "^(0|[1-9][0-9]*)(\\.[0-9]{1,2})?$", maxLength: 12 }),
         cost_price: t.Optional(t.Union([t.String({ pattern: "^(0|[1-9][0-9]*)(\\.[0-9]{1,2})?$", maxLength: 12 }), t.Null()])),
         unit: t.String({ minLength: 1, maxLength: 60 }),
@@ -27,7 +27,7 @@ export const productModel = new Elysia().model({
         id: t.Optional(t.Number({ minimum: 1 })),
         name: t.String({ minLength: 1, maxLength: 60 }),
         description: t.Optional(t.String({ maxLength: 255 })),
-        sku: t.String({ minLength: 1, maxLength: 60 }),
+        sku: t.Optional(t.String({ maxLength: 60 })),
         price: t.String({ pattern: "^(0|[1-9][0-9]*)(\\.[0-9]{1,2})?$", maxLength: 12 }),
         cost_price: t.Optional(t.Union([t.String({ pattern: "^(0|[1-9][0-9]*)(\\.[0-9]{1,2})?$", maxLength: 12 }), t.Null()])),
         unit: t.String({ minLength: 1, maxLength: 60 }),

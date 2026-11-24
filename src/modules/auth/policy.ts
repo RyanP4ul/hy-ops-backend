@@ -43,6 +43,7 @@ export function mayAccess(role: string, method: string, pathname: string): boole
     || (method === "GET" && /^\/driver\/returns\/\d+\/proofs\/[0-9a-f-]{36}$/i.test(path))
     || (method === "POST" && path === "/driver/vehicle-issues")
     || (method === "POST" && /^\/driver\/trips\/\d+\/start$/.test(path))
+    || ((method === "GET" || method === "POST") && /^\/driver\/trips\/\d+\/incidents$/.test(path))
     || ((method === "GET" || method === "POST") && /^\/driver\/stops\/\d+\/proofs$/.test(path))
     || (method === "GET" && /^\/driver\/stops\/\d+\/proofs\/[0-9a-f-]{36}$/i.test(path))
     || (method === "GET" && /^\/driver\/(profile|settings|trips(?:\/\d+)?|history)$/.test(path))

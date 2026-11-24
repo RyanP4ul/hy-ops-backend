@@ -11,7 +11,11 @@ export async function notifyDeliveryStaff(
   delivery: { id: number; vehicle_id: number },
   title: string,
   message: string,
-  type: "DELIVERY_LOCATION_STOPPED" | "DELIVERY_COMPLETED",
+  type:
+    | "DELIVERY_LOCATION_STOPPED"
+    | "DELIVERY_COMPLETED"
+    | "DAILY_CAPACITY_FULL"
+    | "DELIVERY_INCIDENT",
 ) {
   const [vehicle] = await tx.select({ warehouseId: vehicles.warehouse_id })
     .from(vehicles).where(eq(vehicles.id, delivery.vehicle_id));
